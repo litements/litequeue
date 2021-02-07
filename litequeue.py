@@ -8,9 +8,11 @@ __version__ = "0.1"
 # SQLite works better in autocommit mode when using short DML (INSERT / UPDATE / DELETE) statements
 # source: https://charlesleifer.com/blog/going-fast-with-sqlite-and-python/
 @contextmanager
-def transaction(conn: sqlite3.Connection):
+def transaction(conn: sqlite3.Connection, mode: str = "DEFERRED"):
     # We must issue a "BEGIN" explicitly when running in auto-commit mode.
-    conn.execute("BEGIN")
+    # NOTE: f-strings are not recommended for SQL, but in this case it's something
+    # internal to the queue that is never exposed to the end-user of the object
+    conn.execute(f"BEGIN {mode}")
     try:
         # Yield control back to the caller.
         yield conn
@@ -81,7 +83,6 @@ END;"""
     def put(self, message: str, timeout: int = None) -> int:
         "Insert a new task"
 
-        # with transaction(self.conn) as c:
         rid = self.conn.execute(
             "INSERT INTO Queue VALUES (:message, lower(hex(randomblob(16))), 0, strftime('%s','now'), NULL, NULL)",
             {"message": message},
@@ -89,13 +90,21 @@ END;"""
 
         return rid
 
-    def pop(self) -> Dict[str, str]:
+    def pop(self) -> Optional[Dict[str, str]]:
 
         # lastrowid not working as I expected when executing
         # updates inside a transaction
 
         # this should happen all inside a single transaction
-        with transaction(self.conn) as c:
+        with transaction(self.conn, mode="IMMEDIATE") as c:
+            # the `pop` action happens in 3 steps that happen inside a transaction
+            # 1: select the first undone task
+            # 2: lock the task to avoid another process from getting it too
+            # 3: return the selected task
+            # I think there's a chance that 2 processes lock the same row, there are 2
+            # mechanisms to deal with it:
+            # * Using the "IMMEDIATE" mode for the transaction, which locks the database immediately.
+            # * When doing the UPDATE statement, the condition checks the status again.
             task = c.execute(
                 """
             SELECT message, task_id FROM Queue
@@ -109,7 +118,7 @@ END;"""
 
             c.execute(
                 """
-UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :task_id
+UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :task_id AND status = 0
 """,
                 {"task_id": task["task_id"]},
             )
@@ -140,7 +149,6 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :t
         the last time this function is called.
         """
 
-        # with transaction(self.conn) as c:
         x = self.conn.execute(
             "UPDATE Queue SET status = 2,  done_time = strftime('%s','now') WHERE task_id = :task_id",
             {"task_id": task_id},
@@ -163,7 +171,6 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :t
         raise NotImplementedError
 
     def prune(self):
-        # with transaction(self.conn) as c:
         self.conn.execute("DELETE FROM Queue WHERE status = 2")
 
         self.conn.execute("VACUUM;")
