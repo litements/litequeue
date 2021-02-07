@@ -10,6 +10,10 @@ Since it's all based on SQLite / SQL, it is easily extendable.
 
 ## Installation
 
+```
+pip install litequeue
+```
+
 ## Differences with a normal Python `queue.Queue`
 
 * Persistence
