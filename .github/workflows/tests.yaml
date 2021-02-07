@@ -1,0 +1,20 @@
+name: Tests
+on: [push]
+jobs:
+  tests:
+    name: ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [3.7, 3.8, 3.9]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: pip deps
+        run: |
+          pip install jupyterlab nbconvert
+      - name: runtests
+        run: jupyter nbconvert --execute tests.ipynb --to notebook
