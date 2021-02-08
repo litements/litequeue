@@ -4,9 +4,11 @@
 
 ## Why?
 
-You can use this to implement a persistent queue. It also has extra timing metrics for the tasks and the api to set a task as done lets you specifiy the `task_id` to set as done.
+You can use this to implement a persistent queue. It also has extra timing metrics for the tasks, and the api to set a task as done lets you specifiy the `task_id` to be set as done.
 
 Since it's all based on SQLite / SQL, it is easily extendable.
+
+Tasks/messages are always passed as strings, so you can use json data as messages. Messages are interpreted as tasks, so after you `pop` a message, you need to mark it as done when you finish processing it.
 
 ## Installation
 
@@ -28,9 +30,6 @@ The examples are taken from the tests in [`tests.ipynb`](./tests.ipynb)
 
 ```python
 from litequeue import SQLQueue
-
-TEST_1 = "key_test_1"
-TEST_2 = "key_test_2"
 
 q = SQLQueue(":memory:")
 
