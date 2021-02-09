@@ -1,5 +1,5 @@
 import pprint
-from typing import Callable, Tuple, Dict, Optional
+from typing import Callable, Tuple, Dict, Optional, Union
 import sqlite3
 from contextlib import contextmanager
 
@@ -90,7 +90,7 @@ END;"""
 
         return rid
 
-    def pop(self) -> Optional[Dict[str, str]]:
+    def pop(self) -> Optional[Dict[str, Union[int, str]]]:
 
         # lastrowid not working as I expected when executing
         # updates inside a transaction
@@ -125,7 +125,7 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :t
 
             return dict(task)
 
-    def peek(self) -> Tuple:
+    def peek(self) -> Dict:
         "Show next task to be popped."
         # order by should not be really needed
         value = self.conn.execute(
@@ -133,7 +133,7 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :t
         ).fetchone()
         return dict(value)
 
-    def get(self, task_id: str) -> Tuple:
+    def get(self, task_id: str) -> Optional[Dict[str, Union[int, str]]]:
         "Get a task by its `task_id`"
 
         value = self.conn.execute(
@@ -171,9 +171,10 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :t
         raise NotImplementedError
 
     def prune(self):
-        self.conn.execute("DELETE FROM Queue WHERE status = 2")
 
+        self.conn.execute("DELETE FROM Queue WHERE status = 2")
         self.conn.execute("VACUUM;")
+
         return
 
     def __repr__(self):
