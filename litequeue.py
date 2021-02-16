@@ -109,7 +109,7 @@ END;"""
                 """
             SELECT message, task_id FROM Queue
             WHERE rowid = (SELECT min(rowid) FROM Queue
-                           WHERE status = 0 LIMIT 1)
+                           WHERE status = 0)
             """
             ).fetchone()
 
