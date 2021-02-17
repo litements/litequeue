@@ -3,7 +3,7 @@ from typing import Callable, Tuple, Dict, Optional, Union
 import sqlite3
 from contextlib import contextmanager
 
-__version__ = "0.2"
+__version__ = "0.2.1"
 
 # SQLite works better in autocommit mode when using short DML (INSERT / UPDATE / DELETE) statements
 # source: https://charlesleifer.com/blog/going-fast-with-sqlite-and-python/
