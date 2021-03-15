@@ -1,9 +1,25 @@
 import pprint
-from typing import Callable, Tuple, Dict, Optional, Union
+import pathlib
+from typing import Dict, Optional, Union
 import sqlite3
 from contextlib import contextmanager
 
-__version__ = "0.2.1"
+# The __init__ function and the following imports are adapted
+# from sqlite-utils by Simon Willison (@simonw)
+# written under the Apache 2 LICENSE
+# https://github.com/simonw/sqlite-utils/blob/main/sqlite_utils/db.py
+
+try:
+    import pysqlite3 as sqlite3
+    import pysqlite3.dbapi2
+
+    OperationalError = pysqlite3.dbapi2.OperationalError
+except ImportError:
+    import sqlite3
+
+    OperationalError = sqlite3.OperationalError
+
+__version__ = "0.3"
 
 # SQLite works better in autocommit mode when using short DML (INSERT / UPDATE / DELETE) statements
 # source: https://charlesleifer.com/blog/going-fast-with-sqlite-and-python/
@@ -26,21 +42,31 @@ def transaction(conn: sqlite3.Connection, mode: str = "DEFERRED"):
 class SQLQueue:
     def __init__(
         self,
-        dbname=":memory:",
+        filename_or_conn=None,
+        memory=False,
         maxsize: Optional[int] = None,
-        check_same_thread=False,
-        fast=True,
         **kwargs,
     ):
-        self.dbname = dbname
-        self.conn = sqlite3.connect(
-            self.dbname,
-            check_same_thread=check_same_thread,
-            isolation_level=None,
-            **kwargs,
-        )
-        self.maxsize = maxsize
+        assert (filename_or_conn is not None and not memory) or (
+            filename_or_conn is None and memory
+        ), "Either specify a filename_or_conn or pass memory=True"
+        if memory or filename_or_conn == ":memory:":
+            self.conn = sqlite3.connect(":memory:", isolation_level=None, **kwargs)
+        elif isinstance(filename_or_conn, (str, pathlib.Path)):
+            self.conn = sqlite3.connect(
+                str(filename_or_conn), isolation_level=None, **kwargs
+            )
+        else:
+            self.conn = filename_or_conn
+            self.conn.isolation_level = None
 
+        # self.conn = sqlite3.connect(
+        #     self.dbname,
+        #     check_same_thread=check_same_thread,
+        #     isolation_level=None,
+        #     **kwargs,
+        # )
+        self.maxsize = maxsize
         self.conn.row_factory = sqlite3.Row
 
         # status 0: free, 1: locked, 2: done
@@ -62,11 +88,11 @@ class SQLQueue:
             c.execute("CREATE INDEX IF NOT EXISTS TIdx ON Queue(task_id)")
             c.execute("CREATE INDEX IF NOT EXISTS SIdx ON Queue(status)")
 
-        if fast:
-            self.conn.execute("PRAGMA journal_mode = 'WAL';")
-            self.conn.execute("PRAGMA temp_store = 2;")
-            self.conn.execute("PRAGMA synchronous = 1;")
-            self.conn.execute(f"PRAGMA cache_size = {-1 * 64_000};")
+        # if fast:
+        self.conn.execute("PRAGMA journal_mode = 'WAL';")
+        self.conn.execute("PRAGMA temp_store = 2;")
+        self.conn.execute("PRAGMA synchronous = 1;")
+        self.conn.execute(f"PRAGMA cache_size = {-1 * 64_000};")
 
         if maxsize is not None:
             self.conn.execute(
@@ -178,7 +204,7 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :t
         return
 
     def __repr__(self):
-        return f"{type(self).__name__}(dbname={self.dbname!r}, items={pprint.pformat([dict(x) for x in self.conn.execute('SELECT * FROM Queue').fetchall()])})"
+        return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat([dict(x) for x in self.conn.execute('SELECT * FROM Queue').fetchall()])})"
 
     def close(self):
         self.conn.close()
