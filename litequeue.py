@@ -19,7 +19,7 @@ except ImportError:
 
     OperationalError = sqlite3.OperationalError
 
-__version__ = "0.3"
+__version__ = "0.4"
 
 # SQLite works better in autocommit mode when using short DML (INSERT / UPDATE / DELETE) statements
 # source: https://charlesleifer.com/blog/going-fast-with-sqlite-and-python/
@@ -77,7 +77,7 @@ class SQLQueue:
             c.execute(
                 """CREATE TABLE IF NOT EXISTS Queue 
                 ( message TEXT NOT NULL,
-                  task_id TEXT,
+                  message_id TEXT,
                   status INTEGER,
                   in_time INTEGER NOT NULL,
                   lock_time INTEGER,
@@ -85,7 +85,7 @@ class SQLQueue:
                 """
             )
 
-            c.execute("CREATE INDEX IF NOT EXISTS TIdx ON Queue(task_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS TIdx ON Queue(message_id)")
             c.execute("CREATE INDEX IF NOT EXISTS SIdx ON Queue(status)")
 
         # if fast:
@@ -107,7 +107,7 @@ END;"""
             )
 
     def put(self, message: str, timeout: int = None) -> int:
-        "Insert a new task"
+        "Insert a new message"
 
         rid = self.conn.execute(
             "INSERT INTO Queue VALUES (:message, lower(hex(randomblob(16))), 0, strftime('%s','now'), NULL, NULL)",
@@ -124,60 +124,61 @@ END;"""
         # this should happen all inside a single transaction
         with transaction(self.conn, mode="IMMEDIATE") as c:
             # the `pop` action happens in 3 steps that happen inside a transaction
-            # 1: select the first undone task
-            # 2: lock the task to avoid another process from getting it too
-            # 3: return the selected task
+            # 1: select the first undone message
+            # 2: lock the message to avoid another process from getting it too
+            # 3: return the selected message
             # I think there's a chance that 2 processes lock the same row, there are 2
             # mechanisms to deal with it:
             # * Using the "IMMEDIATE" mode for the transaction, which locks the database immediately.
             # * When doing the UPDATE statement, the condition checks the status again.
-            task = c.execute(
+            message = c.execute(
                 """
-            SELECT message, task_id FROM Queue
+            SELECT message, message_id FROM Queue
             WHERE rowid = (SELECT min(rowid) FROM Queue
                            WHERE status = 0)
             """
             ).fetchone()
 
-            if task is None:
+            if message is None:
                 return None
 
             c.execute(
                 """
-UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :task_id AND status = 0
+UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id = :message_id AND status = 0
 """,
-                {"task_id": task["task_id"]},
+                {"message_id": message["message_id"]},
             )
 
-            return dict(task)
+            return dict(message)
 
     def peek(self) -> Dict:
-        "Show next task to be popped."
+        "Show next message to be popped."
         # order by should not be really needed
         value = self.conn.execute(
             "SELECT * FROM Queue WHERE status = 0 ORDER BY rowid LIMIT 1"
         ).fetchone()
         return dict(value)
 
-    def get(self, task_id: str) -> Optional[Dict[str, Union[int, str]]]:
-        "Get a task by its `task_id`"
+    def get(self, message_id: str) -> Optional[Dict[str, Union[int, str]]]:
+        "Get a message by its `message_id`"
 
         value = self.conn.execute(
-            "SELECT * FROM Queue WHERE task_id = :task_id", {"task_id": task_id}
+            "SELECT * FROM Queue WHERE message_id = :message_id",
+            {"message_id": message_id},
         ).fetchone()
 
         return dict(value) if value is not None else value
 
-    def done(self, task_id) -> int:
+    def done(self, message_id) -> int:
         """
-        Mark task as done.
+        Mark message as done.
         If executed multiple times, `done_time` will be
         the last time this function is called.
         """
 
         x = self.conn.execute(
-            "UPDATE Queue SET status = 2,  done_time = strftime('%s','now') WHERE task_id = :task_id",
-            {"task_id": task_id},
+            "UPDATE Queue SET status = 2,  done_time = strftime('%s','now') WHERE message_id = :message_id",
+            {"message_id": message_id},
         ).lastrowid
         return x
 
@@ -194,7 +195,19 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE task_id = :t
         return not bool(value["cnt"])
 
     def full(self) -> bool:
-        raise NotImplementedError
+        # Here I need to check compared to the maxsize value
+        # If maxsize is not set, the queue can grow forever
+        if self.maxsize is None:
+            return False
+
+        value = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM Queue WHERE status = 0"
+        ).fetchone()
+
+        if value["cnt"] >= self.maxsize:
+            return True
+        else:
+            return False
 
     def prune(self):
 
