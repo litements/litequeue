@@ -47,15 +47,17 @@ q.get(task["message_id"])
 
 #    {'message': 'hello',
 #     'message_id': 'c9b9ef76e3a77cc66dd749d485613ec1',
-#     'status': 2,   <---- status is now 2 (DONE)
+#     'status': 2,               <---- status is now 2 (DONE)
 #     'in_time': 1612711138,
 #     'lock_time': 1612711138,
 #     'done_time': 1612711138}
 ```
 
+Check out [the docs page](https://litements.exampl.io/queue/) for more.
+
 ## Examples
 
-The examples are taken from the tests in [`tests.ipynb`](./tests.ipynb)
+The examples are mostly taken from the tests in [`tests.ipynb`](./tests.ipynb)
 
 
 ```python
