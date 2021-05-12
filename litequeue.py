@@ -19,24 +19,7 @@ except ImportError:
 
     OperationalError = sqlite3.OperationalError
 
-__version__ = "0.4"
-
-# SQLite works better in autocommit mode when using short DML (INSERT / UPDATE / DELETE) statements
-# source: https://charlesleifer.com/blog/going-fast-with-sqlite-and-python/
-@contextmanager
-def transaction(conn: sqlite3.Connection, mode: str = "DEFERRED"):
-    # We must issue a "BEGIN" explicitly when running in auto-commit mode.
-    # NOTE: f-strings are not recommended for SQL, but in this case it's something
-    # internal to the queue that is never exposed to the end-user of the object
-    conn.execute(f"BEGIN {mode}")
-    try:
-        # Yield control back to the caller.
-        yield conn
-    except:
-        conn.rollback()  # Roll back all changes if an exception occurs.
-        raise
-    else:
-        conn.commit()
+__version__ = "0.4.5"
 
 
 class SQLQueue:
@@ -60,33 +43,27 @@ class SQLQueue:
             self.conn = filename_or_conn
             self.conn.isolation_level = None
 
-        # self.conn = sqlite3.connect(
-        #     self.dbname,
-        #     check_same_thread=check_same_thread,
-        #     isolation_level=None,
-        #     **kwargs,
-        # )
-        self.maxsize = maxsize
+        self.maxsize = int(maxsize) if maxsize is not None else maxsize
         self.conn.row_factory = sqlite3.Row
 
         # status 0: free, 1: locked, 2: done
 
-        with transaction(self.conn) as c:
+        with self.transaction():
             # int == bool in SQLite
             # will have rowid as primary key by default
-            c.execute(
+            self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS Queue 
                 ( message TEXT NOT NULL,
                   message_id TEXT,
                   status INTEGER,
-                  in_time INTEGER NOT NULL,
+                  in_time INTEGER NOT NULL DEFAULT (strftime('%s','now')),
                   lock_time INTEGER,
                   done_time INTEGER )
                 """
             )
 
-            c.execute("CREATE INDEX IF NOT EXISTS TIdx ON Queue(message_id)")
-            c.execute("CREATE INDEX IF NOT EXISTS SIdx ON Queue(status)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS TIdx ON Queue(message_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS SIdx ON Queue(status)")
 
         # if fast:
         self.conn.execute("PRAGMA journal_mode = 'WAL';")
@@ -94,7 +71,7 @@ class SQLQueue:
         self.conn.execute("PRAGMA synchronous = 1;")
         self.conn.execute(f"PRAGMA cache_size = {-1 * 64_000};")
 
-        if maxsize is not None:
+        if self.maxsize is not None:
             self.conn.execute(
                 f"""
 CREATE TRIGGER IF NOT EXISTS maxsize_control 
@@ -106,8 +83,11 @@ BEGIN
 END;"""
             )
 
-    def put(self, message: str, timeout: int = None) -> int:
-        "Insert a new message"
+    def put(self, message: str) -> int:
+        # timeout: int = None
+        """
+        Insert a new message
+        """
 
         rid = self.conn.execute(
             "INSERT INTO Queue VALUES (:message, lower(hex(randomblob(16))), 0, strftime('%s','now'), NULL, NULL)",
@@ -122,7 +102,7 @@ END;"""
         # updates inside a transaction
 
         # this should happen all inside a single transaction
-        with transaction(self.conn, mode="IMMEDIATE") as c:
+        with self.transaction(mode="IMMEDIATE"):
             # the `pop` action happens in 3 steps that happen inside a transaction
             # 1: select the first undone message
             # 2: lock the message to avoid another process from getting it too
@@ -131,7 +111,7 @@ END;"""
             # mechanisms to deal with it:
             # * Using the "IMMEDIATE" mode for the transaction, which locks the database immediately.
             # * When doing the UPDATE statement, the condition checks the status again.
-            message = c.execute(
+            message = self.conn.execute(
                 """
             SELECT message, message_id FROM Queue
             WHERE rowid = (SELECT min(rowid) FROM Queue
@@ -142,7 +122,7 @@ END;"""
             if message is None:
                 return None
 
-            c.execute(
+            self.conn.execute(
                 """
 UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id = :message_id AND status = 0
 """,
@@ -215,6 +195,24 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id =
         self.conn.execute("VACUUM;")
 
         return
+
+    # SQLite works better in autocommit mode when using short DML (INSERT / UPDATE / DELETE) statements
+    # source: https://charlesleifer.com/blog/going-fast-with-sqlite-and-python/
+    @contextmanager
+    def transaction(self, mode="DEFERRED"):
+
+        if mode not in {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}:
+            raise ValueError(f"Transaction mode '{mode}' is not valid")
+        # We must issue a "BEGIN" explicitly when running in auto-commit mode.
+        self.conn.execute(f"BEGIN {mode}")
+        try:
+            # Yield control back to the caller.
+            yield
+        except:
+            self.conn.rollback()  # Roll back all changes if an exception occurs.
+            raise
+        else:
+            self.conn.commit()
 
     def __repr__(self):
         return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat([dict(x) for x in self.conn.execute('SELECT * FROM Queue').fetchall()])})"
