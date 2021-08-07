@@ -1,6 +1,6 @@
 import pprint
 import pathlib
-from typing import Dict, Optional, Union
+from typing import Callable, Dict, Optional, Union
 import sqlite3
 from contextlib import contextmanager
 
@@ -10,8 +10,8 @@ from contextlib import contextmanager
 # https://github.com/simonw/sqlite-utils/blob/main/sqlite_utils/db.py
 
 try:
-    import pysqlite3 as sqlite3
-    import pysqlite3.dbapi2
+    import pysqlite3 as sqlite3  # type: ignore # noqa
+    import pysqlite3.dbapi2  # noqa
 
     OperationalError = pysqlite3.dbapi2.OperationalError
 except ImportError:
@@ -19,32 +19,38 @@ except ImportError:
 
     OperationalError = sqlite3.OperationalError
 
-__version__ = "0.4.5"
+__version__ = "0.5"
 
 
 class SQLQueue:
     def __init__(
         self,
-        filename_or_conn=None,
-        memory=False,
+        filename_or_conn: Optional[Union[sqlite3.Connection, str, pathlib.Path]] = None,
+        memory: bool = False,
         maxsize: Optional[int] = None,
         **kwargs,
     ):
         assert (filename_or_conn is not None and not memory) or (
             filename_or_conn is None and memory
         ), "Either specify a filename_or_conn or pass memory=True"
+
         if memory or filename_or_conn == ":memory:":
             self.conn = sqlite3.connect(":memory:", isolation_level=None, **kwargs)
+
         elif isinstance(filename_or_conn, (str, pathlib.Path)):
             self.conn = sqlite3.connect(
                 str(filename_or_conn), isolation_level=None, **kwargs
             )
+
         else:
+            assert filename_or_conn is not None
             self.conn = filename_or_conn
             self.conn.isolation_level = None
 
         self.maxsize = int(maxsize) if maxsize is not None else maxsize
         self.conn.row_factory = sqlite3.Row
+
+        self.pop: Callable = self.select_pop_func()
 
         # status 0: free, 1: locked, 2: done
 
@@ -52,7 +58,7 @@ class SQLQueue:
             # int == bool in SQLite
             # will have rowid as primary key by default
             self.conn.execute(
-                """CREATE TABLE IF NOT EXISTS Queue 
+                """CREATE TABLE IF NOT EXISTS Queue
                 ( message TEXT NOT NULL,
                   message_id TEXT,
                   status INTEGER,
@@ -74,7 +80,7 @@ class SQLQueue:
         if self.maxsize is not None:
             self.conn.execute(
                 f"""
-CREATE TRIGGER IF NOT EXISTS maxsize_control 
+CREATE TRIGGER IF NOT EXISTS maxsize_control
    BEFORE INSERT
    ON Queue
    WHEN (SELECT COUNT(*) FROM Queue WHERE status = 0) >= {self.maxsize}
@@ -82,6 +88,34 @@ BEGIN
     SELECT RAISE (ABORT,'Max queue length reached');
 END;"""
             )
+
+    def get_sqlite_version(self) -> int:
+        sqlite_ver = sqlite3.sqlite_version.split(".")
+
+        v_major = int(sqlite_ver[0])
+        v_min = int(sqlite_ver[1])
+        # _v_bug = int(sqlite_ver[2])
+
+        assert v_major == 3
+
+        return v_min
+
+    def select_pop_func(self) -> Callable:
+        """
+        Decide which message pop() logic to use
+        depending on the sqlite version.
+        """
+
+        v = self.get_sqlite_version()
+
+        if v >= 35:
+            # RETURNING clause available
+            return self._pop_returning
+
+        else:
+            # RETURNING clause unavailable
+            # use custom locking logic
+            return self._pop_transaction
 
     def put(self, message: str) -> int:
         # timeout: int = None
@@ -96,7 +130,31 @@ END;"""
 
         return rid
 
-    def pop(self) -> Optional[Dict[str, Union[int, str]]]:
+    def _pop_returning(self) -> Optional[Dict[str, Union[int, str]]]:
+
+        # this should happen all inside a single transaction
+        with self.transaction(mode="IMMEDIATE"):
+
+            message = self.conn.execute(
+                """
+UPDATE Queue SET status = 1, lock_time = strftime('%s','now')
+WHERE rowid = (SELECT min(rowid) FROM Queue
+                WHERE status = 0)
+RETURNING *;
+"""
+            ).fetchone()
+
+            if not message:
+                return None
+
+            return dict(message)
+
+    def _pop_transaction(self) -> Optional[Dict[str, Union[int, str]]]:
+        """
+        Pop from the queue using a transaction and custom locking logic.
+        This function should be used with SQLite versions < 3.35.0
+        since that's when the UPDATE ... RETURNING clause was introduced.
+        """
 
         # lastrowid not working as I expected when executing
         # updates inside a transaction
@@ -208,9 +266,9 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id =
         try:
             # Yield control back to the caller.
             yield
-        except:
+        except BaseException as e:
             self.conn.rollback()  # Roll back all changes if an exception occurs.
-            raise
+            raise e
         else:
             self.conn.commit()
 
