@@ -3,23 +3,16 @@ import pathlib
 from typing import Callable, Dict, Optional, Union
 import sqlite3
 from contextlib import contextmanager
+from enum import Enum
 
-# The __init__ function and the following imports are adapted
-# from sqlite-utils by Simon Willison (@simonw)
-# written under the Apache 2 LICENSE
-# https://github.com/simonw/sqlite-utils/blob/main/sqlite_utils/db.py
+__version__ = "0.6"
 
-try:
-    import pysqlite3 as sqlite3  # type: ignore # noqa
-    import pysqlite3.dbapi2  # noqa
 
-    OperationalError = pysqlite3.dbapi2.OperationalError
-except ImportError:
-    import sqlite3
-
-    OperationalError = sqlite3.OperationalError
-
-__version__ = "0.5"
+class MessageStatus(int, Enum):
+    READY = 0
+    LOCKED = 1
+    DONE = 2
+    FAILED = 3
 
 
 class SQLQueue:
@@ -39,7 +32,10 @@ class SQLQueue:
 
         elif isinstance(filename_or_conn, (str, pathlib.Path)):
             self.conn = sqlite3.connect(
-                str(filename_or_conn), isolation_level=None, **kwargs
+                str(filename_or_conn),
+                isolation_level=None,
+                check_same_thread=False,
+                **kwargs,
             )
 
         else:
@@ -81,9 +77,9 @@ class SQLQueue:
 CREATE TRIGGER IF NOT EXISTS maxsize_control
    BEFORE INSERT
    ON Queue
-   WHEN (SELECT COUNT(*) FROM Queue WHERE status = 0) >= {self.maxsize}
+   WHEN (SELECT COUNT(*) FROM Queue WHERE status = {MessageStatus.READY}) >= {self.maxsize}
 BEGIN
-    SELECT RAISE (ABORT,'Max queue length reached');
+    SELECT RAISE (ABORT,'Max queue length reached: {self.maxsize}');
 END;"""
             )
 
@@ -121,12 +117,13 @@ END;"""
         Insert a new message
         """
 
-        rid = self.conn.execute(
+        x = self.conn.execute(
             "INSERT INTO Queue VALUES (:message, lower(hex(randomblob(16))), 0, strftime('%s','now'), NULL, NULL)",
             {"message": message},
         ).lastrowid
 
-        return rid
+        assert x
+        return x
 
     def _pop_returning(self) -> Optional[Dict[str, Union[int, str]]]:
 
@@ -137,9 +134,10 @@ END;"""
                 """
 UPDATE Queue SET status = 1, lock_time = strftime('%s','now')
 WHERE rowid = (SELECT min(rowid) FROM Queue
-                WHERE status = 0)
+                WHERE status = :status)
 RETURNING *;
-"""
+""",
+                {"status": MessageStatus.READY},
             ).fetchone()
 
             if not message:
@@ -171,8 +169,9 @@ RETURNING *;
                 """
             SELECT message, message_id FROM Queue
             WHERE rowid = (SELECT min(rowid) FROM Queue
-                           WHERE status = 0)
-            """
+                           WHERE status = :status)
+            """.strip(),
+                {"status": MessageStatus.READY},
             ).fetchone()
 
             if message is None:
@@ -180,9 +179,12 @@ RETURNING *;
 
             self.conn.execute(
                 """
-UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id = :message_id AND status = 0
-""",
-                {"message_id": message["message_id"]},
+                UPDATE Queue SET
+                  status = 1
+                  , lock_time = strftime('%s','now')
+                WHERE message_id = :message_id AND status = :status
+                """.strip(),
+                {"status": MessageStatus.READY, "message_id": message["message_id"]},
             )
 
             return dict(message)
@@ -191,7 +193,8 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id =
         "Show next message to be popped."
         # order by should not be really needed
         value = self.conn.execute(
-            "SELECT * FROM Queue WHERE status = 0 ORDER BY rowid LIMIT 1"
+            "SELECT * FROM Queue WHERE status = :status ORDER BY rowid LIMIT 1",
+            {"status": MessageStatus.READY},
         ).fetchone()
         return dict(value)
 
@@ -213,20 +216,77 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id =
         """
 
         x = self.conn.execute(
-            "UPDATE Queue SET status = 2,  done_time = strftime('%s','now') WHERE message_id = :message_id",
-            {"message_id": message_id},
+            """
+            UPDATE Queue SET
+              status = :status
+              , done_time = strftime('%s','now')
+            WHERE message_id = :message_id
+            """.strip(),
+            {"status": MessageStatus.DONE, "message_id": message_id},
         ).lastrowid
+
+        assert x
+        return x
+
+    def failed(self, message_id) -> int:
+        """
+        Mark a message as failed.
+        """
+
+        x = self.conn.execute(
+            """
+            UPDATE Queue SET
+              status = :status
+              , done_time = strftime('%s','now')
+            WHERE message_id = :message_id
+            """.strip(),
+            {"status": MessageStatus.FAILED, "message_id": message_id},
+        ).lastrowid
+
+        assert x
+        return x
+
+    def retry(self, message_id) -> int:
+        """
+        Mark a locked message as free again.
+        """
+
+        x = self.conn.execute(
+            """
+            UPDATE Queue SET
+              status = :status
+              , done_time = strftime('%s','now')
+            WHERE message_id = :message_id
+            """.strip(),
+            {"status": MessageStatus.READY, "message_id": message_id},
+        ).lastrowid
+
+        assert x
         return x
 
     def qsize(self) -> int:
-        return next(self.conn.execute("SELECT COUNT(*) FROM Queue WHERE status != 2"))[
-            0
-        ]
+        """
+        Get current size of the queue.
+        """
+
+        cursor = self.conn.execute(
+            """
+        SELECT COUNT(*) FROM Queue
+        WHERE status NOT IN (:status_done, :status_failed)
+        """.strip(),
+            {"status_done": MessageStatus.DONE, "status_failed": MessageStatus.FAILED},
+        )
+
+        return next(cursor)[0]
 
     def empty(self) -> bool:
+        """
+        Return True if the queue is empty.
+        """
 
         value = self.conn.execute(
-            "SELECT COUNT(*) as cnt FROM Queue WHERE status = 0"
+            "SELECT COUNT(*) as cnt FROM Queue WHERE status = :status",
+            {"status": MessageStatus.READY},
         ).fetchone()
         return not bool(value["cnt"])
 
@@ -241,7 +301,8 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id =
             return False
 
         value = self.conn.execute(
-            "SELECT COUNT(*) as cnt FROM Queue WHERE status = 0"
+            "SELECT COUNT(*) as cnt FROM Queue WHERE status = :status",
+            {"status": MessageStatus.READY},
         ).fetchone()
 
         if value["cnt"] >= self.maxsize:
@@ -254,8 +315,10 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id =
         Delete `done` messages.
         """
 
-        self.conn.execute("DELETE FROM Queue WHERE status = 2")
-        self.conn.execute("VACUUM;")
+        self.conn.execute(
+            "DELETE FROM Queue WHERE status IN (:status_done, :status_failed)",
+            {"status_done": MessageStatus.DONE, "status_failed": MessageStatus.FAILED},
+        )
 
         return
 
