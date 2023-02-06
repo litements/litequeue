@@ -52,8 +52,6 @@ class SQLQueue:
 
         self.pop: Callable = self.select_pop_func()
 
-        # status 0: free, 1: locked, 2: done
-
         with self.transaction():
             # int == bool in SQLite
             # will have rowid as primary key by default
@@ -233,6 +231,10 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id =
         return not bool(value["cnt"])
 
     def full(self) -> bool:
+        """
+        Return True if the queue is full.
+        """
+
         # Here I need to check compared to the maxsize value
         # If maxsize is not set, the queue can grow forever
         if self.maxsize is None:
@@ -248,11 +250,23 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id =
             return False
 
     def prune(self):
+        """
+        Delete `done` messages.
+        """
 
         self.conn.execute("DELETE FROM Queue WHERE status = 2")
         self.conn.execute("VACUUM;")
 
         return
+
+    def vacuum(self):
+        """
+        Vacuum the database.
+
+        IMPORTANT: The `VACUUM` step can take some time to finish depending on
+        the size of the queue and how many messages have been deleted.
+        """
+        self.conn.execute("VACUUM;")
 
     # SQLite works better in autocommit mode when using short DML (INSERT / UPDATE / DELETE) statements
     # source: https://charlesleifer.com/blog/going-fast-with-sqlite-and-python/
@@ -273,7 +287,10 @@ UPDATE Queue SET status = 1, lock_time = strftime('%s','now') WHERE message_id =
             self.conn.commit()
 
     def __repr__(self):
-        return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat([dict(x) for x in self.conn.execute('SELECT * FROM Queue').fetchall()])})"
+        display_items = [
+            dict(x) for x in self.conn.execute("SELECT * FROM Queue LIMIT 5").fetchall()
+        ]
+        return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat(display_items)})"
 
     def close(self):
         self.conn.close()
