@@ -126,10 +126,8 @@ END;"""
         return x
 
     def _pop_returning(self) -> Optional[Dict[str, Union[int, str]]]:
-
         # this should happen all inside a single transaction
         with self.transaction(mode="IMMEDIATE"):
-
             message = self.conn.execute(
                 """
 UPDATE Queue SET status = 1, lock_time = strftime('%s','now')
@@ -335,7 +333,6 @@ RETURNING *;
     # source: https://charlesleifer.com/blog/going-fast-with-sqlite-and-python/
     @contextmanager
     def transaction(self, mode="DEFERRED"):
-
         if mode not in {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}:
             raise ValueError(f"Transaction mode '{mode}' is not valid")
         # We must issue a "BEGIN" explicitly when running in auto-commit mode.
