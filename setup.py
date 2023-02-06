@@ -22,6 +22,6 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url="https://github.com/litements/litequeue",
     py_modules=["litequeue"],
-    classifiers=["Operating System :: OS Independent",],
+    classifiers=["Operating System :: OS Independent"],
     python_requires=">=3.6",
 )
