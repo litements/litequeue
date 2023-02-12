@@ -24,7 +24,7 @@ time_ns = time.time_ns
 
 
 def _now() -> int:
-    return int(time.time())
+    return time_ns()
 
 
 def uuid7(
@@ -207,7 +207,7 @@ class LiteQueue:
                   data       TEXT NOT NULL
                   , message_id TEXT NOT NULL
                   , status     INTEGER NOT NULL
-                  , in_time    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                  , in_time    INTEGER NOT NULL
                   , lock_time  INTEGER
                   , done_time  INTEGER
                 )
@@ -422,6 +422,8 @@ RETURNING *;
         `threshold_seconds` seconds.
         """
 
+        threshold_nanoseconds = threshold_seconds * 1e9
+
         cursor = self.conn.execute(
             f"""
             SELECT * FROM Queue
@@ -429,7 +431,7 @@ RETURNING *;
               status = {MessageStatus.LOCKED}
               AND  lock_time < :time_value
             """.strip(),
-            {"now": _now(), "time_value": _now() - threshold_seconds},
+            {"time_value": _now() - threshold_nanoseconds},
         )
 
         for result in cursor:
@@ -501,7 +503,7 @@ RETURNING *;
 
     def prune(self):
         """
-        Delete `done` messages.
+        Delete `done` and `failed` messages. # TODO: maybe not failed ones
         """
 
         self.conn.execute(
