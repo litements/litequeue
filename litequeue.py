@@ -253,7 +253,7 @@ RETURNING *;
             """
             UPDATE Queue SET
               status = :status
-              , done_time = strftime('%s','now')
+              , done_time = NULL
             WHERE message_id = :message_id
             """.strip(),
             {"status": MessageStatus.READY, "message_id": message_id},
