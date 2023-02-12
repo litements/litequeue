@@ -10,7 +10,10 @@ print(sqlite3.sqlite_version)
 @pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])
 def q(request) -> LiteQueue:
     _q = LiteQueue(":memory:")
-    _q.pop = getattr(_q, request.param)
+
+    if _q.get_sqlite_version() > 35:
+        _q.pop = getattr(_q, request.param)
+
     return _q
 
 
