@@ -68,7 +68,7 @@ Check out [the docs page](https://litements.exampl.io/queue/) for more.
 You can have a look at the `test.py` file. The tests are short and showcase
 different usage scenarios.
 
-The `benchmarks.ipynb` file contains some benchmarks comparing `litequeue` to
+The `benchmark.ipynb` file contains some benchmarks comparing `litequeue` to
 the built-in Python `Queue`.
 
 ## Meta
