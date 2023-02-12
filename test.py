@@ -160,3 +160,9 @@ def test_list_locked(q):
 
     assert len(list(q.list_locked(threshold_seconds=0.1))) == 1
     assert len(list(q.list_locked(threshold_seconds=20))) == 0
+
+    q.done(task.message_id)
+
+    assert len(list(q.list_locked(threshold_seconds=0.1))) == 0
+
+
