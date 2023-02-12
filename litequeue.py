@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from enum import Enum
 from dataclasses import dataclass
 import sys
-from uuid import UUID
 import time
 import os
 
@@ -28,22 +27,17 @@ def _now() -> int:
 
 
 def uuid7(
-    as_type: Optional[str] = None,
     time_func: Callable[[], int] = time_ns,
     _last=[0, 0, 0, 0],  # noqa
     _last_as_of=[0, 0, 0, 0],  # noqa
-) -> Union[UUID, str, int, bytes]:
+) -> str:
     """
     UUID v7, following the proposed extension to RFC4122 described in
     https://www.ietf.org/id/draft-peabody-dispatch-new-uuid-format-02.html.
-    All representations (string, byte array, int) sort chronologically,
-    with a potential time resolution of 50ns (if the system clock
-    supports this).
+    All representations sort chronologically, with a potential time resolution
+    of 50ns (if the system clock supports this).
     Parameters
     ----------
-    as_type - Optional string to return the UUID in a different format.
-                A uuid.UUID (version 7, variant 0x10) is returned unless
-                this is one of 'str', 'int', 'hex' or 'bytes'.
     time_func - Set the time function, which must return integer
                 nanoseconds since the Unix epoch, midnight on 1-Jan-1970.
                 Defaults to time.time_ns(). This is exposed because
@@ -77,23 +71,13 @@ def uuid7(
             +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     Indicative timings:
     - uuid.uuid4()            2.4us
-    - uuid7()                 3.7us
-    - uuid7(as_type='int')    1.6us
     - uuid7(as_type='str')    2.5us
     Examples
     --------
     >>> uuid7()
-    UUID('061cb26a-54b8-7a52-8000-2124e7041024')
+    '061cb26a-54b8-7a52-8000-2124e7041024'
     >>> uuid7(0)
-    UUID('00000000-0000-0000-0000-00000000000')
-    >>> for fmt in ('bytes', 'hex', 'int', 'str', 'uuid', None):
-    ...     print(fmt, repr(uuid7(as_type=fmt)))
-    bytes b'\x06\x1c\xb8\xfe\x0f\x0b|9\x80\x00\tjt\x85\xb3\xbb'
-    hex '061cb8fe0f0b7c3980011863b956b758'
-    int 8124504378724980906989670469352026642
-    str '061cb8fe-0f0b-7c39-8003-d44a7ee0bdf6'
-    uuid UUID('061cb8fe-0f0b-7c39-8004-0489578299f6')
-    None UUID('061cb8fe-0f0f-7df2-8000-afd57c2bf446')
+    '00000000-0000-0000-0000-00000000000'
     """
     ns = time_func()
     last = _last
@@ -132,20 +116,7 @@ def uuid7(
         # Six random bytes for the lower part of the uuid
         rand = os.urandom(6)
 
-    # Build output
-    if as_type == "str":
-        return f"{t1:>08x}-{t2:>04x}-{t3:>04x}-{t4:>04x}-{rand.hex()}"
-
-    r = int.from_bytes(rand, "big")
-    uuid_int = (t1 << 96) + (t2 << 80) + (t3 << 64) + (t4 << 48) + r
-    if as_type == "int":
-        return uuid_int
-    elif as_type == "hex":
-        return f"{uuid_int:>032x}"
-    elif as_type == "bytes":
-        return uuid_int.to_bytes(16, "big")
-    else:
-        return UUID(int=uuid_int)
+    return f"{t1:>08x}-{t2:>04x}-{t3:>04x}-{t4:>04x}-{rand.hex()}"
 
 
 class MessageStatus(int, Enum):
@@ -158,7 +129,7 @@ class MessageStatus(int, Enum):
 @dataclass(frozen=True, **_DKW)
 class Message:
     data: str
-    message_id: UUID
+    message_id: str  # UUID v7
     status: MessageStatus
     in_time: int
     lock_time: Optional[int]
@@ -268,10 +239,10 @@ END;"""
         Insert a new message
         """
         # timeout: int = None
-        message_id: str = cast(str, uuid7(as_type="str"))
+        message_id: str = cast(str, uuid7())
         now = _now()
 
-        _cursor = self.conn.execute(
+        _cursor = self.conn.execute(  # noqa
             f"""
             INSERT INTO
               Queue(  data,  message_id, status,                 in_time, lock_time, done_time )
@@ -282,7 +253,7 @@ END;"""
 
         return Message(
             data=data,
-            message_id=UUID(message_id),
+            message_id=message_id,
             status=MessageStatus.READY,
             in_time=now,
             lock_time=None,
@@ -365,7 +336,7 @@ END;"""
             # it in the returned object before returning it to the user
             return Message(
                 data=message["data"],
-                message_id=UUID(message["message_id"]),
+                message_id=message["message_id"],
                 status=MessageStatus.LOCKED,
                 in_time=message["in_time"],
                 lock_time=lock_time,
