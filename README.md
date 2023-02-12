@@ -94,5 +94,5 @@ Distributed under the MIT license. See `LICENSE` for more information.
 The only hard rules for the project are:
 
 - No extra dependencies allowed
-- No extra files, everything must be inside the main module's `.py` file.
-- Tests must be inside the `tests.ipynb` notebook.
+- No extra files, everything must be inside `litequeue.py` file.
+- Tests must be inside the `test.py` file.
