@@ -329,8 +329,8 @@ RETURNING *;
         """
         self.conn.execute("VACUUM;")
 
-    # SQLite works better in autocommit mode when using short DML (INSERT / UPDATE / DELETE) statements
-    # source: https://charlesleifer.com/blog/going-fast-with-sqlite-and-python/
+    # SQLite works better in autocommit mode when using short DML (INSERT /
+    # UPDATE / DELETE) statements
     @contextmanager
     def transaction(self, mode="DEFERRED"):
         if mode not in {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}:
@@ -348,7 +348,7 @@ RETURNING *;
 
     def __repr__(self):
         display_items = [
-            dict(x) for x in self.conn.execute("SELECT * FROM Queue LIMIT 5").fetchall()
+            dict(x) for x in self.conn.execute("SELECT * FROM Queue LIMIT 3").fetchall()
         ]
         return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat(display_items)})"
 
