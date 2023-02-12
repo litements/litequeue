@@ -118,7 +118,11 @@ END;"""
         """
 
         x = self.conn.execute(
-            "INSERT INTO Queue VALUES (:message, lower(hex(randomblob(16))), 0, strftime('%s','now'), NULL, NULL)",
+            """
+            INSERT INTO
+              Queue( message,  message_id,                 status, in_time,              lock_time, done_time )
+            VALUES ( :message, lower(hex(randomblob(16))), 0,      strftime('%s','now'), NULL,      NULL      )
+            """.strip(),
             {"message": message},
         ).lastrowid
 
