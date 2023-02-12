@@ -157,3 +157,19 @@ def test_list_locked(q):
     q.done(task.message_id)
 
     assert len(list(q.list_locked(threshold_seconds=0.1))) == 0
+
+
+def test_retry_failed(q):
+    q.put("foo")
+
+    task = q.pop()
+
+    q.mark_failed(task.message_id)
+
+    assert q.get(task.message_id).status == MessageStatus.FAILED
+
+    q.retry(task.message_id)
+
+    assert q.get(task.message_id).status == MessageStatus.READY
+    assert q.get(task.message_id).done_time is None
+    assert q.qsize() == 1
