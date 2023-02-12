@@ -416,6 +416,25 @@ RETURNING *;
         assert x
         return x
 
+    def list_locked(self, threshold_seconds: int) -> Iterable[Message]:
+        """
+        Return all the tasks that have been in the `LOCKED` state for more than
+        `threshold_seconds` seconds.
+        """
+
+        cursor = self.conn.execute(
+            f"""
+            SELECT * FROM Queue
+            WHERE
+              status = {MessageStatus.LOCKED}
+              AND  lock_time + :now > :threshold_seconds
+            """.strip(),
+            {"now": _now(), "threshold_seconds": threshold_seconds},
+        )
+
+        for result in cursor:
+            yield Message(**result)
+
     def retry(self, message_id) -> int:
         """
         Mark a locked message as free again.
