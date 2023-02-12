@@ -46,7 +46,7 @@ class LiteQueue:
         self.maxsize = int(maxsize) if maxsize is not None else maxsize
         self.conn.row_factory = sqlite3.Row
 
-        self.pop: Callable = self.select_pop_func()
+        self.pop: Callable = self._select_pop_func()
 
         with self.transaction():
             # int == bool in SQLite
@@ -94,7 +94,7 @@ END;"""
 
         return v_min
 
-    def select_pop_func(self) -> Callable:
+    def _select_pop_func(self) -> Callable:
         """
         Decide which message pop() logic to use
         depending on the sqlite version.
