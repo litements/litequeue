@@ -6,4 +6,5 @@
 !README.md
 !setup.py
 !tests.ipynb
-!.github
+!.github/
+!.github/**
