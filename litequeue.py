@@ -360,8 +360,10 @@ END;"""
             )
 
             # We have updated the status in the databases, we will manually set
-            # it in the returned object before returning ig to the user
-            return Message(status=MessageStatus.LOCKED, **message)
+            # it in the returned object before returning it to the user
+            message["status"] = MessageStatus.LOCKED
+
+            return Message(**message)
 
     def peek(self) -> Optional[Message]:
         "Show next message to be popped, if any."
