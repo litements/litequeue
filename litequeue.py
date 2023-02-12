@@ -294,13 +294,16 @@ END;"""
         with self.transaction(mode="IMMEDIATE"):
             message = self.conn.execute(
                 f"""
-UPDATE Queue
-SET status = {MessageStatus.LOCKED}, lock_time = :now
-WHERE rowid = (SELECT min(rowid) FROM Queue
-                WHERE status = :status)
-RETURNING *;
-""",
-                {"status": MessageStatus.READY, "now": _now()},
+                 UPDATE Queue
+                 SET status = {MessageStatus.LOCKED}, lock_time = :now
+                 WHERE rowid = (SELECT rowid
+                                FROM Queue
+                                WHERE status = {MessageStatus.READY}
+                                ORDER BY message_id
+                                LIMIT 1)
+                 RETURNING *
+                 """,
+                {"now": _now()},
             ).fetchone()
 
             if not message:
@@ -329,10 +332,13 @@ RETURNING *;
             # * Using the "IMMEDIATE" mode for the transaction, which locks the database immediately.
             # * When doing the UPDATE statement, the condition checks the status again.
             message = self.conn.execute(
-                """
-            SELECT message, message_id FROM Queue
-            WHERE rowid = (SELECT min(rowid) FROM Queue
-                           WHERE status = :status)
+                f"""
+            SELECT data, message_id FROM Queue
+            WHERE rowid = (SELECT rowid
+                           FROM Queue
+                           WHERE status = {MessageStatus.READY}
+                           ORDER BY message_id
+                           LIMIT 1)
             """.strip(),
                 {"status": MessageStatus.READY},
             ).fetchone()
