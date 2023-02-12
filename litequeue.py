@@ -351,11 +351,10 @@ END;"""
                 UPDATE Queue SET
                   status = {MessageStatus.LOCKED}
                   , lock_time = :now
-                WHERE message_id = :message_id AND status = :status
+                WHERE message_id = :message_id AND status = {MessageStatus.READY}
                 """.strip(),
                 {
                     "now": _now(),
-                    "status": MessageStatus.READY,
                     "message_id": message["message_id"],
                 },
             )
@@ -366,8 +365,7 @@ END;"""
         "Show next message to be popped, if any."
 
         value = self.conn.execute(
-            "SELECT * FROM Queue WHERE status = :status ORDER BY message_id LIMIT 1",
-            {"status": MessageStatus.READY},
+            f"SELECT * FROM Queue WHERE status = {MessageStatus.READY} ORDER BY message_id LIMIT 1",
         ).fetchone()
 
         return Message(**value) if value is not None else None
@@ -392,13 +390,13 @@ END;"""
         now = _now()
 
         x = self.conn.execute(
-            """
+            f"""
             UPDATE Queue SET
-              status = :status
+              status = {MessageStatus.DONE}
               , done_time = :now
             WHERE message_id = :message_id
             """.strip(),
-            {"status": MessageStatus.DONE, "now": now, "message_id": message_id},
+            {"now": now, "message_id": message_id},
         ).lastrowid
 
         assert x
@@ -410,13 +408,13 @@ END;"""
         """
 
         x = self.conn.execute(
-            """
+            f"""
             UPDATE Queue SET
-              status = :status
+              status = {MessageStatus.FAILED}
               , done_time = :now
             WHERE message_id = :message_id
             """.strip(),
-            {"status": MessageStatus.FAILED, "now": _now(), "message_id": message_id},
+            {"now": _now(), "message_id": message_id},
         ).lastrowid
 
         assert x
@@ -449,13 +447,13 @@ END;"""
         """
 
         x = self.conn.execute(
-            """
+            f"""
             UPDATE Queue SET
-              status = :status
+              status = {MessageStatus.READY}
               , done_time = NULL
             WHERE message_id = :message_id
             """.strip(),
-            {"status": MessageStatus.READY, "message_id": message_id},
+            {"message_id": message_id},
         ).lastrowid
 
         assert x
@@ -467,11 +465,10 @@ END;"""
         """
 
         cursor = self.conn.execute(
-            """
+            f"""
         SELECT COUNT(*) FROM Queue
-        WHERE status NOT IN (:status_done, :status_failed)
-        """.strip(),
-            {"status_done": MessageStatus.DONE, "status_failed": MessageStatus.FAILED},
+        WHERE status NOT IN ({MessageStatus.DONE}, {MessageStatus.FAILED})
+        """.strip()
         )
 
         return next(cursor)[0]
@@ -482,8 +479,7 @@ END;"""
         """
 
         value = self.conn.execute(
-            "SELECT COUNT(*) as cnt FROM Queue WHERE status = :status",
-            {"status": MessageStatus.READY},
+            f"SELECT COUNT(*) as cnt FROM Queue WHERE status = {MessageStatus.READY}"
         ).fetchone()
         return not bool(value["cnt"])
 
@@ -498,8 +494,7 @@ END;"""
             return False
 
         value = self.conn.execute(
-            "SELECT COUNT(*) as cnt FROM Queue WHERE status = :status",
-            {"status": MessageStatus.READY},
+            f"SELECT COUNT(*) as cnt FROM Queue WHERE status = {MessageStatus.READY}"
         ).fetchone()
 
         if value["cnt"] >= self.maxsize:
@@ -513,8 +508,7 @@ END;"""
         """
 
         self.conn.execute(
-            "DELETE FROM Queue WHERE status IN (:status_done, :status_failed)",
-            {"status_done": MessageStatus.DONE, "status_failed": MessageStatus.FAILED},
+            f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE}, {MessageStatus.FAILED})"
         )
 
         return
