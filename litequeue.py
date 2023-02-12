@@ -333,7 +333,7 @@ END;"""
             # * When doing the UPDATE statement, the condition checks the status again.
             message = self.conn.execute(
                 f"""
-            SELECT data, message_id FROM Queue
+            SELECT * FROM Queue
             WHERE rowid = (SELECT rowid
                            FROM Queue
                            WHERE status = {MessageStatus.READY}
