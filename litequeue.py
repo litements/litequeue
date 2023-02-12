@@ -346,24 +346,31 @@ END;"""
             if message is None:
                 return None
 
+            lock_time = _now()
+
             self.conn.execute(
                 f"""
                 UPDATE Queue SET
                   status = {MessageStatus.LOCKED}
-                  , lock_time = :now
+                  , lock_time = :lock_time
                 WHERE message_id = :message_id AND status = {MessageStatus.READY}
                 """.strip(),
                 {
-                    "now": _now(),
+                    "lock_time": lock_time,
                     "message_id": message["message_id"],
                 },
             )
 
             # We have updated the status in the databases, we will manually set
             # it in the returned object before returning it to the user
-            message["status"] = MessageStatus.LOCKED
-
-            return Message(**message)
+            return Message(
+                data=message["data"],
+                message_id=UUID(message["message_id"]),
+                status=MessageStatus.LOCKED,
+                in_time=message["in_time"],
+                lock_time=lock_time,
+                done_time=message["done_time"],
+            )
 
     def peek(self) -> Optional[Message]:
         "Show next message to be popped, if any."
