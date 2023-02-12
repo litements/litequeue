@@ -7,8 +7,6 @@ import sqlite3
 print(sqlite3.sqlite_version)
 
 
-
-
 @pytest.fixture(scope="function")
 def q() -> LiteQueue:
     _q = LiteQueue(":memory:")
@@ -120,11 +118,11 @@ def test_prune(qd):
 def test_max_size():
     q = LiteQueue(":memory:", maxsize=50)
     for i in range(50):
-        q.put(random_string(20))
+        q.put(f"data_{i}")
     assert q.qsize() == 50
 
     with pytest.raises(sqlite3.IntegrityError):
-        q.put(random_string(20))
+        q.put("new")
 
     assert q.full()
 
@@ -153,5 +151,3 @@ def test_list_locked(q):
     q.done(task.message_id)
 
     assert len(list(q.list_locked(threshold_seconds=0.1))) == 0
-
-
