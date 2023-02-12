@@ -189,9 +189,9 @@ RETURNING *;
 
     def peek(self) -> Dict:
         "Show next message to be popped."
-        # order by should not be really needed
+
         value = self.conn.execute(
-            "SELECT * FROM Queue WHERE status = :status ORDER BY rowid LIMIT 1",
+            "SELECT * FROM Queue WHERE status = :status ORDER BY in_time LIMIT 1",
             {"status": MessageStatus.READY},
         ).fetchone()
         return dict(value)
