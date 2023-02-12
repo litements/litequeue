@@ -6,7 +6,7 @@ import sqlite3
 
 print(sqlite3.sqlite_version)
 
-
+# https://docs.pytest.org/en/7.1.x/how-to/fixtures.html#parametrizing-fixtures
 @pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])
 def q(request) -> LiteQueue:
     _q = LiteQueue(":memory:")
