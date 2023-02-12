@@ -7,9 +7,10 @@ import sqlite3
 print(sqlite3.sqlite_version)
 
 
-@pytest.fixture(scope="function")
-def q() -> LiteQueue:
+@pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])
+def q(request) -> LiteQueue:
     _q = LiteQueue(":memory:")
+    _q.pop = getattr(_q, request.param)
     return _q
 
 
