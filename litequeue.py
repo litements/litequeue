@@ -508,7 +508,7 @@ RETURNING *;
 
     def __repr__(self):
         display_items = [
-            dict(x) for x in self.conn.execute("SELECT * FROM Queue LIMIT 3").fetchall()
+            Message(**x) for x in self.conn.execute("SELECT * FROM Queue LIMIT 3").fetchall()
         ]
         return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat(display_items)})"
 
