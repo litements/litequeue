@@ -69,7 +69,7 @@ You can have a look at the `test.py` file. The tests are short and showcase
 different usage scenarios.
 
 The `benchmark.ipynb` file contains some benchmarks comparing `litequeue` to
-the built-in Python `Queue`.
+the built-in Python `queue.Queue`.
 
 ## Meta
 
