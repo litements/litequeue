@@ -145,7 +145,18 @@ def test_max_size():
 
 
 def test_empty(qd):
-    assert qd.empty() == False
+    assert qd.empty() is False
 
     q2 = LiteQueue(":memory:")
-    assert q2.empty() == True
+    assert q2.empty() is True
+
+
+def test_list_locked(q):
+    q.put("foo")
+
+    task = q.pop()
+
+    time.sleep(0.2)
+
+    assert len(list(q.list_locked(threshold_seconds=0.1))) == 1
+    assert len(list(q.list_locked(threshold_seconds=20))) == 0
