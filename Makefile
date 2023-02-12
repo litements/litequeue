@@ -22,6 +22,7 @@ help: ## Display this help section
 
 .init: .venv
 	@$(pip) install -U wheel build twine black mypy ruff pytest
+	@$(pip) install -U --force-reinstall -e .
 	touch .init
 
 .PHONY: install
