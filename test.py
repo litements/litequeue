@@ -7,17 +7,6 @@ import sqlite3
 print(sqlite3.sqlite_version)
 
 
-from string import ascii_lowercase, printable
-from random import choice
-
-
-def random_string(string_length=10, fuzz=False, space=False):
-    """Generate a random string of fixed length"""
-    letters = ascii_lowercase
-    letters = letters + " " if space else letters
-    if fuzz:
-        letters = printable
-    return "".join(choice(letters) for i in range(string_length))
 
 
 @pytest.fixture(scope="function")
