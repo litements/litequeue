@@ -200,8 +200,8 @@ class LiteQueue:
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS Queue
                 ( message TEXT NOT NULL,
-                  message_id TEXT,
-                  status INTEGER,
+                  message_id TEXT NOT NULL,
+                  status INTEGER NOT NULL,
                   in_time INTEGER NOT NULL DEFAULT (strftime('%s','now')),
                   lock_time INTEGER,
                   done_time INTEGER )
