@@ -4,9 +4,15 @@ from typing import Callable, Dict, List, Optional, Union, Any, cast
 import sqlite3
 from contextlib import contextmanager
 from enum import Enum
+from dataclasses import dataclass
+import sys
 from uuid import UUID
 import time
 import os
+
+_DKW: Dict[str, Any] = {}
+if sys.version_info >= (3, 10):
+    _DKW["slots"] = True
 
 __version__ = "0.6"
 
@@ -145,6 +151,16 @@ class MessageStatus(int, Enum):
     FAILED = 3
 
 
+@dataclass(frozen=True, **_DKW)
+class Message:
+    data: str
+    message_id: UUID
+    status: MessageStatus
+    in_time: int
+    lock_time: Optional[int]
+    done_time: Optional[int]
+
+
 class LiteQueue:
     def __init__(
         self,
@@ -241,25 +257,33 @@ END;"""
             # use custom locking logic
             return self._pop_transaction
 
-    def put(self, message: str) -> int:
-        # timeout: int = None
+    def put(self, data: str) -> Message:
         """
         Insert a new message
         """
+        # timeout: int = None
+        message_id: str = cast(str, uuid7(as_type="str"))
+        now = int(time.time())
 
-        x = self.conn.execute(
-            """
+        _cursor = self.conn.execute(
+            f"""
             INSERT INTO
-              Queue( message,  message_id,                 status, in_time,              lock_time, done_time )
-            VALUES ( :message, lower(hex(randomblob(16))), 0,      strftime('%s','now'), NULL,      NULL      )
+              Queue(  message,  message_id, status,                 in_time, lock_time, done_time )
+            VALUES ( :message, :message_id, {MessageStatus.READY}, :now    , NULL     , NULL      )
             """.strip(),
-            {"message": message},
-        ).lastrowid
+            {"message": data, "message_id": message_id, "now": now},
+        )
 
-        assert x
-        return x
+        return Message(
+            data=data,
+            message_id=UUID(message_id),
+            status=MessageStatus.READY,
+            in_time=now,
+            lock_time=None,
+            done_time=None,
+        )
 
-    def _pop_returning(self) -> Optional[Dict[str, Union[int, str]]]:
+    def _pop_returning(self) -> Optional[Message]:
         # this should happen all inside a single transaction
         with self.transaction(mode="IMMEDIATE"):
             message = self.conn.execute(
@@ -275,9 +299,9 @@ RETURNING *;
             if not message:
                 return None
 
-            return dict(message)
+            return Message(**message)
 
-    def _pop_transaction(self) -> Optional[Dict[str, Union[int, str]]]:
+    def _pop_transaction(self) -> Optional[Message]:
         """
         Pop from the queue using a transaction and custom locking logic.
         This function should be used with SQLite versions < 3.35.0
@@ -319,16 +343,16 @@ RETURNING *;
                 {"status": MessageStatus.READY, "message_id": message["message_id"]},
             )
 
-            return dict(message)
+            return Message(**message)
 
-    def peek(self) -> Dict:
+    def peek(self) -> Message:
         "Show next message to be popped."
 
         value = self.conn.execute(
             "SELECT * FROM Queue WHERE status = :status ORDER BY in_time LIMIT 1",
             {"status": MessageStatus.READY},
         ).fetchone()
-        return dict(value)
+        return Message(**value)
 
     def get(self, message_id: str) -> Optional[Dict[str, Union[int, str]]]:
         "Get a message by its `message_id`"
