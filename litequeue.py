@@ -15,7 +15,7 @@ class MessageStatus(int, Enum):
     FAILED = 3
 
 
-class SQLQueue:
+class LiteQueue:
     def __init__(
         self,
         filename_or_conn: Optional[Union[sqlite3.Connection, str, pathlib.Path]] = None,
@@ -354,3 +354,7 @@ RETURNING *;
 
     def close(self):
         self.conn.close()
+
+
+# Kept for backwards compatibility
+SQLQueue = LiteQueue
