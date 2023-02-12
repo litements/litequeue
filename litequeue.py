@@ -1,6 +1,6 @@
 import pprint
 import pathlib
-from typing import Callable, Dict, List, Optional, Union, Any, cast
+from typing import Callable, Dict, Iterable, Optional, Union, Any, cast
 import sqlite3
 from contextlib import contextmanager
 from enum import Enum
@@ -21,6 +21,10 @@ __version__ = "0.6"
 # Expose function used by uuid7() to get current time in nanoseconds
 # since the Unix epoch.
 time_ns = time.time_ns
+
+
+def _now() -> int:
+    return int(time.time())
 
 
 def uuid7(
@@ -265,7 +269,7 @@ END;"""
         """
         # timeout: int = None
         message_id: str = cast(str, uuid7(as_type="str"))
-        now = int(time.time())
+        now = _now()
 
         _cursor = self.conn.execute(
             f"""
@@ -290,12 +294,13 @@ END;"""
         with self.transaction(mode="IMMEDIATE"):
             message = self.conn.execute(
                 f"""
-UPDATE Queue SET status = {MessageStatus.LOCKED}, lock_time = strftime('%s','now')
+UPDATE Queue
+SET status = {MessageStatus.LOCKED}, lock_time = :now
 WHERE rowid = (SELECT min(rowid) FROM Queue
                 WHERE status = :status)
 RETURNING *;
 """,
-                {"status": MessageStatus.READY},
+                {"status": MessageStatus.READY, "now": _now()},
             ).fetchone()
 
             if not message:
@@ -339,24 +344,29 @@ RETURNING *;
                 f"""
                 UPDATE Queue SET
                   status = {MessageStatus.LOCKED}
-                  , lock_time = strftime('%s','now')
+                  , lock_time = :now
                 WHERE message_id = :message_id AND status = :status
                 """.strip(),
-                {"status": MessageStatus.READY, "message_id": message["message_id"]},
+                {
+                    "now": _now(),
+                    "status": MessageStatus.READY,
+                    "message_id": message["message_id"],
+                },
             )
 
             return Message(**message)
 
-    def peek(self) -> Message:
-        "Show next message to be popped."
+    def peek(self) -> Optional[Message]:
+        "Show next message to be popped, if any."
 
         value = self.conn.execute(
             "SELECT * FROM Queue WHERE status = :status ORDER BY message_id LIMIT 1",
             {"status": MessageStatus.READY},
         ).fetchone()
-        return Message(**value)
 
-    def get(self, message_id: str) -> Optional[Dict[str, Union[int, str]]]:
+        return Message(**value) if value is not None else None
+
+    def get(self, message_id: str) -> Optional[Message]:
         "Get a message by its `message_id`"
 
         value = self.conn.execute(
@@ -364,7 +374,7 @@ RETURNING *;
             {"message_id": message_id},
         ).fetchone()
 
-        return dict(value) if value is not None else value
+        return Message(**value) if value is not None else None
 
     def done(self, message_id) -> int:
         """
@@ -373,14 +383,16 @@ RETURNING *;
         the last time this function is called.
         """
 
+        now = _now()
+
         x = self.conn.execute(
             """
             UPDATE Queue SET
               status = :status
-              , done_time = strftime('%s','now')
+              , done_time = :now
             WHERE message_id = :message_id
             """.strip(),
-            {"status": MessageStatus.DONE, "message_id": message_id},
+            {"status": MessageStatus.DONE, "now": now, "message_id": message_id},
         ).lastrowid
 
         assert x
@@ -395,10 +407,10 @@ RETURNING *;
             """
             UPDATE Queue SET
               status = :status
-              , done_time = strftime('%s','now')
+              , done_time = :now
             WHERE message_id = :message_id
             """.strip(),
-            {"status": MessageStatus.FAILED, "message_id": message_id},
+            {"status": MessageStatus.FAILED, "now": _now(), "message_id": message_id},
         ).lastrowid
 
         assert x
