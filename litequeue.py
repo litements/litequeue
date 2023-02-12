@@ -349,7 +349,7 @@ RETURNING *;
         "Show next message to be popped."
 
         value = self.conn.execute(
-            "SELECT * FROM Queue WHERE status = :status ORDER BY in_time LIMIT 1",
+            "SELECT * FROM Queue WHERE status = :status ORDER BY message_id LIMIT 1",
             {"status": MessageStatus.READY},
         ).fetchone()
         return Message(**value)
