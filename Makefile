@@ -51,7 +51,7 @@ test: .venv .init
 publish: TWINE_USERNAME = __token__
 publish: .init dist  ## Publish to PyPi
 	$(venv_bin)/twine check dist/*
-	$(venv_bin)/twine upload --non-interactive dist/*
+	$(venv_bin)/twine upload dist/*
 	
 
 tag:
