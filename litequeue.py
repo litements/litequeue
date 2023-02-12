@@ -226,7 +226,7 @@ RETURNING *;
         assert x
         return x
 
-    def failed(self, message_id) -> int:
+    def mark_failed(self, message_id) -> int:
         """
         Mark a message as failed.
         """
