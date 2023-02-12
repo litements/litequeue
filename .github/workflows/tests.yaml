@@ -17,8 +17,5 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-      - name: pip deps
-        run: |
-          pip install jupyterlab nbconvert
       - name: runtests
-        run: jupyter nbconvert --execute tests.ipynb --to notebook
+        run: make test
