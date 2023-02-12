@@ -427,9 +427,9 @@ RETURNING *;
             SELECT * FROM Queue
             WHERE
               status = {MessageStatus.LOCKED}
-              AND  lock_time + :now > :threshold_seconds
+              AND  lock_time < :time_value
             """.strip(),
-            {"now": _now(), "threshold_seconds": threshold_seconds},
+            {"now": _now(), "time_value": _now() - threshold_seconds},
         )
 
         for result in cursor:
