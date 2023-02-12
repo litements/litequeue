@@ -5,6 +5,7 @@
 !Makefile
 !README.md
 !setup.py
-!tests.ipynb
+!benchmark.ipynb
 !.github/
 !.github/**
+!test.py
