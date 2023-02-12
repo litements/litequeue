@@ -199,12 +199,14 @@ class LiteQueue:
             # will have rowid as primary key by default
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS Queue
-                ( message TEXT NOT NULL,
-                  message_id TEXT NOT NULL,
-                  status INTEGER NOT NULL,
-                  in_time INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-                  lock_time INTEGER,
-                  done_time INTEGER )
+                (
+                  data       TEXT NOT NULL
+                  , message_id TEXT NOT NULL
+                  , status     INTEGER NOT NULL
+                  , in_time    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                  , lock_time  INTEGER
+                  , done_time  INTEGER
+                )
                 """
             )
 
@@ -268,10 +270,10 @@ END;"""
         _cursor = self.conn.execute(
             f"""
             INSERT INTO
-              Queue(  message,  message_id, status,                 in_time, lock_time, done_time )
-            VALUES ( :message, :message_id, {MessageStatus.READY}, :now    , NULL     , NULL      )
+              Queue(  data,  message_id, status,                 in_time, lock_time, done_time )
+            VALUES ( :data, :message_id, {MessageStatus.READY}, :now    , NULL     , NULL      )
             """.strip(),
-            {"message": data, "message_id": message_id, "now": now},
+            {"data": data, "message_id": message_id, "now": now},
         )
 
         return Message(
@@ -287,8 +289,8 @@ END;"""
         # this should happen all inside a single transaction
         with self.transaction(mode="IMMEDIATE"):
             message = self.conn.execute(
-                """
-UPDATE Queue SET status = 1, lock_time = strftime('%s','now')
+                f"""
+UPDATE Queue SET status = {MessageStatus.LOCKED}, lock_time = strftime('%s','now')
 WHERE rowid = (SELECT min(rowid) FROM Queue
                 WHERE status = :status)
 RETURNING *;
@@ -334,9 +336,9 @@ RETURNING *;
                 return None
 
             self.conn.execute(
-                """
+                f"""
                 UPDATE Queue SET
-                  status = 1
+                  status = {MessageStatus.LOCKED}
                   , lock_time = strftime('%s','now')
                 WHERE message_id = :message_id AND status = :status
                 """.strip(),
