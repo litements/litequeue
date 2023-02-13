@@ -22,12 +22,7 @@ __version__ = "0.6"
 time_ns = time.time_ns
 
 
-def _now() -> int:
-    return time_ns()
-
-
 def uuid7(
-    time_func: Callable[[], int] = time_ns,
     _last=[0, 0, 0, 0],  # noqa
     _last_as_of=[0, 0, 0, 0],  # noqa
 ) -> str:
@@ -79,7 +74,7 @@ def uuid7(
     >>> uuid7(0)
     '00000000-0000-0000-0000-00000000000'
     """
-    ns = time_func()
+    ns = time_ns()
     last = _last
 
     if ns == 0:
@@ -240,7 +235,7 @@ END;"""
         """
         # timeout: int = None
         message_id: str = cast(str, uuid7())
-        now = _now()
+        now = time_ns()
 
         _cursor = self.conn.execute(  # noqa
             f"""
@@ -274,7 +269,7 @@ END;"""
                                 LIMIT 1)
                  RETURNING *
                  """,
-                {"now": _now()},
+                {"now": time_ns()},
             ).fetchone()
 
             if not message:
@@ -317,7 +312,7 @@ END;"""
             if message is None:
                 return None
 
-            lock_time = _now()
+            lock_time = time_ns()
 
             self.conn.execute(
                 f"""
@@ -369,7 +364,7 @@ END;"""
         the last time this function is called.
         """
 
-        now = _now()
+        now = time_ns()
 
         x = self.conn.execute(
             f"""
@@ -396,7 +391,7 @@ END;"""
               , done_time = :now
             WHERE message_id = :message_id
             """.strip(),
-            {"now": _now(), "message_id": message_id},
+            {"now": time_ns(), "message_id": message_id},
         ).lastrowid
 
         assert x
@@ -417,7 +412,7 @@ END;"""
               status = {MessageStatus.LOCKED}
               AND  lock_time < :time_value
             """.strip(),
-            {"time_value": _now() - threshold_nanoseconds},
+            {"time_value": time_ns() - threshold_nanoseconds},
         )
 
         for result in cursor:
