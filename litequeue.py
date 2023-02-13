@@ -207,7 +207,7 @@ END;"""
             )
 
     def get_sqlite_version(self) -> int:
-        sqlite_ver = sqlite3.sqlite_version.split(".")
+        sqlite_ver = sqlite3.sqlite_version_info
 
         v_major = int(sqlite_ver[0])
         v_min = int(sqlite_ver[1])
