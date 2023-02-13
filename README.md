@@ -6,7 +6,7 @@
 
 You can use this to implement a persistent queue. It also has extra timing
 metrics for the messages/tasks, and the api to set a message as **done** lets
-you specifiy the `task_id` to be set as done.
+you specifiy the `message_id` to be set as done.
 
 Since it's all based on SQLite / SQL, it is easily extendable.
 
