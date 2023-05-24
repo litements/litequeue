@@ -17,6 +17,7 @@ help: ## Display this help section
 .venv:  ## Create venv
 	$(py) -m venv .venv
 	$(pip) install -U pip setuptools
+	touch .venv
 
 
 
@@ -26,7 +27,7 @@ help: ## Display this help section
 	touch .init
 
 .PHONY: install
-dev: .init ## Create .venv and install basic packages
+install: .init ## Create .venv and install basic packages
 
 dist:  ## Build package for distribution
 	$(py) -m build --sdist --wheel --outdir dist/ .
@@ -53,9 +54,8 @@ publish: .init dist  ## Publish to PyPi
 	$(venv_bin)/twine check dist/*
 	$(venv_bin)/twine upload --non-interactive dist/*
 	
-
+tag: _TAG := $${TAG:?'FAIL. TAG variable not set'}
 tag:
-	@if [ -z $${TAG+x} ]; then echo "TAG variable not set" && exit 1; fi
-	git tag $(TAG)
-	git push --atomic --set-upstream origin main $(TAG)
+	git tag $(_TAG)
+	git push --atomic --set-upstream origin main $(_TAG)
 
