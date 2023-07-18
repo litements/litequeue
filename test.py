@@ -1,8 +1,10 @@
-import pytest
-from litequeue import LiteQueue, MessageStatus
-import time
 import sqlite3
+import time
 
+import pytest
+
+from litequeue import LiteQueue
+from litequeue import MessageStatus
 
 print(sqlite3.sqlite_version)
 
