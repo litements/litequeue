@@ -10,8 +10,12 @@ venv_bin = .venv/bin
 
 .DEFAULT_GOAL := help
 .PHONY: help
-help: ## Display this help section
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z\$$/]+.*:.*?##\s/ {printf "\033[36m%-38s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+help: ## Display this message
+	@grep -E \
+		'^[a-zA-Z\.\$$/]+.*:.*?##\s.*$$' $(MAKEFILE_LIST) | \
+		sort | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-38s\033[0m %s\n", $$1, $$2}'
+
 
 
 .venv:  ## Create venv
