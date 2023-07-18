@@ -63,7 +63,6 @@ def test_get_unknow(q):
 
 
 def test_pop_all_locked(qd):
-
     # Lock every message
     for _ in range(4):
         qd.pop()
@@ -117,7 +116,7 @@ def test_prune(qd):
 
     assert (
         q.conn.execute(
-            f"SELECT * FROM Queue WHERE status = {MessageStatus.DONE}"
+            f"SELECT * FROM Queue WHERE status = {MessageStatus.DONE.value}"
         ).fetchall()
         == []
     )
