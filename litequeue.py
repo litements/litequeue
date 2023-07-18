@@ -363,7 +363,7 @@ END;"""
 
         return Message(**value) if value is not None else None
 
-    def done(self, message_id) -> int:
+    def done(self, message_id) -> Optional[int]:
         """
         Mark message as done.
         If executed multiple times, `done_time` will be
@@ -382,10 +382,9 @@ END;"""
             {"now": now, "message_id": message_id},
         ).lastrowid
 
-        assert x
         return x
 
-    def mark_failed(self, message_id) -> int:
+    def mark_failed(self, message_id) -> Optional[int]:
         """
         Mark a message as failed.
         """
@@ -400,7 +399,6 @@ END;"""
             {"now": time_ns(), "message_id": message_id},
         ).lastrowid
 
-        assert x
         return x
 
     def list_locked(self, threshold_seconds: int) -> Iterable[Message]:
