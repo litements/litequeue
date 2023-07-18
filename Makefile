@@ -3,7 +3,7 @@ SHELL := bash
 MAKEFLAGS += --warn-undefined-variables
 MAKEFLAGS += --no-builtin-rules
 
-py = $$(if [ -d $(PWD)/'.venv' ]; then echo $(PWD)/".venv/bin/python3"; else echo "python3"; fi)
+py = $(CURDIR)/.venv/bin/python3
 pip = $(py) -m pip
 venv_bin = .venv/bin
 
@@ -19,7 +19,7 @@ help: ## Display this message
 
 
 .venv:  ## Create venv
-	$(py) -m venv .venv
+	python3 -m venv .venv
 	$(pip) install -U pip setuptools
 	touch .venv
 
