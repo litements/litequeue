@@ -48,7 +48,7 @@ fix:  ## Run ruff and black
 
 
 .PHONY: test
-test: .venv .init
+test: .venv .init  ## Run tests
 	$(py) -m pytest test.py
 
 
