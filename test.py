@@ -1,8 +1,10 @@
 import sqlite3
+import tempfile
 import time
+from pathlib import Path
+from typing import Tuple
 
 import pytest
-
 from litequeue import LiteQueue
 from litequeue import MessageStatus
 
@@ -19,6 +21,24 @@ def q(request) -> LiteQueue:
         _q.pop = getattr(_q, request.param)
 
     return _q
+
+
+@pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])
+def multi_queue(request) -> Tuple[LiteQueue, LiteQueue]:
+    """
+    Create a tmp dir, create a DB in it with multiple queues.
+    """
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test-queue.sqlite3"
+        q1 = LiteQueue(db_path, queue_name="queue1")
+        q2 = LiteQueue(db_path, queue_name="queue2")
+
+        for _q in [q1, q2]:
+            if _q.get_sqlite_version() > 35:
+                _q.pop = getattr(_q, request.param[1])
+
+        return q1, q2
 
 
 @pytest.fixture(scope="function")
