@@ -499,7 +499,9 @@ END;"""
 
     def prune(self, include_failed: bool = True):
         """
-        Delete `done` and `failed` messages. # TODO: maybe not failed ones
+        Delete `DONE` messages.
+        
+        If `include_failed` is True, the messages in `FAILED` state will be deleted too.
         """
         if include_failed:
             self.conn.execute(
