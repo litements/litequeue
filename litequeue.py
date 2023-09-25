@@ -423,7 +423,7 @@ END;"""
 
     def list_failed(self) -> Iterable[Message]:
         """
-        Return all the tasks that have been in the `FAILED`.
+        Return all the tasks in `FAILED` state.
         """
 
         cursor = self.conn.execute(
