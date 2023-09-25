@@ -311,8 +311,7 @@ END;"""
                            WHERE status = {MessageStatus.READY.value}
                            ORDER BY message_id
                            LIMIT 1)
-            """.strip(),
-                {"status": MessageStatus.READY.value},
+            """.strip()
             ).fetchone()
 
             if message is None:
