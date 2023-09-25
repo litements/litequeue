@@ -497,15 +497,18 @@ END;"""
         else:
             return False
 
-    def prune(self):
+    def prune(self, include_failed: bool = True):
         """
         Delete `done` and `failed` messages. # TODO: maybe not failed ones
         """
-
+        if include_failed:
+            self.conn.execute(
+                f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
+            )
+            return
         self.conn.execute(
-            f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
+            f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value})"
         )
-
         return
 
     def vacuum(self):
