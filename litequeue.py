@@ -456,7 +456,7 @@ END;"""
         for result in cursor:
             yield Message(**result)
 
-    def retry(self, message_id) -> int:
+    def retry(self, message_id) -> Optional[int]:
         """
         Mark a locked message as free again.
         """
