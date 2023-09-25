@@ -526,11 +526,10 @@ END;"""
             self.conn.execute(
                 f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
             )
-            return
-        self.conn.execute(
-            f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value})"
-        )
-        return
+        else:
+            self.conn.execute(
+                f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value})"
+            )
 
     def vacuum(self):
         """
