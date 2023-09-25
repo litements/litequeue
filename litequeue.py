@@ -436,7 +436,6 @@ END;"""
             {"message_id": message_id},
         ).lastrowid
 
-        assert x
         return x
 
     def qsize(self) -> int:
