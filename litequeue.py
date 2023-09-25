@@ -421,6 +421,22 @@ END;"""
         for result in cursor:
             yield Message(**result)
 
+    def list_failed(self) -> Iterable[Message]:
+        """
+        Return all the tasks that have been in the `FAILED`.
+        """
+
+        cursor = self.conn.execute(
+            f"""
+            SELECT * FROM Queue
+            WHERE
+              status = {MessageStatus.FAILED.value}
+            """.strip()
+        )
+
+        for result in cursor:
+            yield Message(**result)
+
     def retry(self, message_id) -> int:
         """
         Mark a locked message as free again.
