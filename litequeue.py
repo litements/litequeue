@@ -137,12 +137,24 @@ class Message:
     done_time: Optional[int]
 
 
+def validate_table_name(name: str) -> str:
+    """
+    Validate a table name.
+    """
+
+    for char in "[]'`\"":
+        if char in name:
+            raise ValueError(f"Invalid table name: {name}")
+    return name
+
+
 class LiteQueue:
     def __init__(
         self,
         filename_or_conn: Optional[Union[sqlite3.Connection, str, pathlib.Path]] = None,
         memory: bool = False,
         maxsize: Optional[int] = None,
+        queue_name: str = "Queue",
         **kwargs,
     ):
         assert (filename_or_conn is not None and not memory) or (
@@ -170,11 +182,14 @@ class LiteQueue:
 
         self.pop: Callable = self._select_pop_func()
 
+        validate_table_name(queue_name)
+        self.table = f"[{queue_name}]"
+
         with self.transaction():
             # int == bool in SQLite
             # will have rowid as primary key by default
             self.conn.execute(
-                """CREATE TABLE IF NOT EXISTS Queue
+                f"""CREATE TABLE IF NOT EXISTS {self.table}
                 (
                   data       TEXT NOT NULL
                   , message_id TEXT NOT NULL
@@ -186,8 +201,12 @@ class LiteQueue:
                 """
             )
 
-            self.conn.execute("CREATE INDEX IF NOT EXISTS TIdx ON Queue(message_id)")
-            self.conn.execute("CREATE INDEX IF NOT EXISTS SIdx ON Queue(status)")
+            self.conn.execute(
+                f"CREATE INDEX IF NOT EXISTS TIdx ON {self.table}(message_id)"
+            )
+            self.conn.execute(
+                f"CREATE INDEX IF NOT EXISTS SIdx ON {self.table}(status)"
+            )
 
         # if fast:
         self.conn.execute("PRAGMA journal_mode = 'WAL';")
@@ -200,8 +219,8 @@ class LiteQueue:
                 f"""
 CREATE TRIGGER IF NOT EXISTS maxsize_control
    BEFORE INSERT
-   ON Queue
-   WHEN (SELECT COUNT(*) FROM Queue WHERE status = {MessageStatus.READY.value}) >= {self.maxsize}
+   ON {self.table}
+   WHEN (SELECT COUNT(*) FROM {self.table} WHERE status = {MessageStatus.READY.value}) >= {self.maxsize}
 BEGIN
     SELECT RAISE (ABORT,'Max queue length reached: {self.maxsize}');
 END;"""
@@ -246,7 +265,7 @@ END;"""
         _cursor = self.conn.execute(  # noqa
             f"""
             INSERT INTO
-              Queue(  data,  message_id, status,                      in_time, lock_time, done_time )
+              {self.table}(  data,  message_id, status,                      in_time, lock_time, done_time )
             VALUES ( :data, :message_id, {MessageStatus.READY.value}, :now    , NULL     , NULL      )
             """.strip(),
             {"data": data, "message_id": message_id, "now": now},
@@ -266,10 +285,10 @@ END;"""
         with self.transaction(mode="IMMEDIATE"):
             message = self.conn.execute(
                 f"""
-                 UPDATE Queue
+                 UPDATE {self.table}
                  SET status = {MessageStatus.LOCKED.value}, lock_time = :now
                  WHERE rowid = (SELECT rowid
-                                FROM Queue
+                                FROM {self.table}
                                 WHERE status = {MessageStatus.READY.value}
                                 ORDER BY message_id
                                 LIMIT 1)
@@ -305,9 +324,9 @@ END;"""
             # * When doing the UPDATE statement, the condition checks the status again.
             message = self.conn.execute(
                 f"""
-            SELECT * FROM Queue
+            SELECT * FROM {self.table}
             WHERE rowid = (SELECT rowid
-                           FROM Queue
+                           FROM {self.table}
                            WHERE status = {MessageStatus.READY.value}
                            ORDER BY message_id
                            LIMIT 1)
@@ -321,7 +340,7 @@ END;"""
 
             self.conn.execute(
                 f"""
-                UPDATE Queue SET
+                UPDATE {self.table} SET
                   status = {MessageStatus.LOCKED.value}
                   , lock_time = :lock_time
                 WHERE message_id = :message_id AND status = {MessageStatus.READY.value}
@@ -347,7 +366,7 @@ END;"""
         "Show next message to be popped, if any."
 
         value = self.conn.execute(
-            f"SELECT * FROM Queue WHERE status = {MessageStatus.READY.value} ORDER BY message_id LIMIT 1",
+            f"SELECT * FROM {self.table} WHERE status = {MessageStatus.READY.value} ORDER BY message_id LIMIT 1",
         ).fetchone()
 
         return Message(**value) if value is not None else None
@@ -356,7 +375,7 @@ END;"""
         "Get a message by its `message_id`"
 
         value = self.conn.execute(
-            "SELECT * FROM Queue WHERE message_id = :message_id",
+            f"SELECT * FROM {self.table} WHERE message_id = :message_id",
             {"message_id": message_id},
         ).fetchone()
 
@@ -373,7 +392,7 @@ END;"""
 
         x = self.conn.execute(
             f"""
-            UPDATE Queue SET
+            UPDATE {self.table} SET
               status = {MessageStatus.DONE.value}
               , done_time = :now
             WHERE message_id = :message_id
@@ -390,7 +409,7 @@ END;"""
 
         x = self.conn.execute(
             f"""
-            UPDATE Queue SET
+            UPDATE {self.table} SET
               status = {MessageStatus.FAILED.value}
               , done_time = :now
             WHERE message_id = :message_id
@@ -410,7 +429,7 @@ END;"""
 
         cursor = self.conn.execute(
             f"""
-            SELECT * FROM Queue
+            SELECT * FROM {self.table}
             WHERE
               status = {MessageStatus.LOCKED.value}
               AND  lock_time < :time_value
@@ -444,7 +463,7 @@ END;"""
 
         x = self.conn.execute(
             f"""
-            UPDATE Queue SET
+            UPDATE {self.table} SET
               status = {MessageStatus.READY.value}
               , done_time = NULL
             WHERE message_id = :message_id
@@ -461,7 +480,7 @@ END;"""
 
         cursor = self.conn.execute(
             f"""
-        SELECT COUNT(*) FROM Queue
+        SELECT COUNT(*) FROM {self.table}
         WHERE status NOT IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})
         """.strip()
         )
@@ -474,7 +493,7 @@ END;"""
         """
 
         value = self.conn.execute(
-            f"SELECT COUNT(*) as cnt FROM Queue WHERE status = {MessageStatus.READY.value}"
+            f"SELECT COUNT(*) as cnt FROM {self.table} WHERE status = {MessageStatus.READY.value}"
         ).fetchone()
         return not bool(value["cnt"])
 
@@ -489,7 +508,7 @@ END;"""
             return False
 
         value = self.conn.execute(
-            f"SELECT COUNT(*) as cnt FROM Queue WHERE status = {MessageStatus.READY.value}"
+            f"SELECT COUNT(*) as cnt FROM {self.table} WHERE status = {MessageStatus.READY.value}"
         ).fetchone()
 
         if value["cnt"] >= self.maxsize:
@@ -500,7 +519,7 @@ END;"""
     def prune(self, include_failed: bool = True):
         """
         Delete `DONE` messages.
-        
+
         If `include_failed` is True, the messages in `FAILED` state will be deleted too.
         """
         if include_failed:
@@ -542,7 +561,7 @@ END;"""
     def __repr__(self):
         display_items = [
             Message(**x)
-            for x in self.conn.execute("SELECT * FROM Queue LIMIT 3").fetchall()
+            for x in self.conn.execute(f"SELECT * FROM {self.table} LIMIT 3").fetchall()
         ]
         return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat(display_items)})"
 
