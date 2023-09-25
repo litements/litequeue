@@ -421,6 +421,22 @@ END;"""
         for result in cursor:
             yield Message(**result)
 
+    def list_failed(self) -> Iterable[Message]:
+        """
+        Return all the tasks in `FAILED` state.
+        """
+
+        cursor = self.conn.execute(
+            f"""
+            SELECT * FROM Queue
+            WHERE
+              status = {MessageStatus.FAILED.value}
+            """.strip()
+        )
+
+        for result in cursor:
+            yield Message(**result)
+
     def retry(self, message_id) -> int:
         """
         Mark a locked message as free again.
@@ -436,7 +452,6 @@ END;"""
             {"message_id": message_id},
         ).lastrowid
 
-        assert x
         return x
 
     def qsize(self) -> int:
@@ -482,15 +497,20 @@ END;"""
         else:
             return False
 
-    def prune(self):
+    def prune(self, include_failed: bool = True):
         """
-        Delete `done` and `failed` messages. # TODO: maybe not failed ones
+        Delete `DONE` messages.
+        
+        If `include_failed` is True, the messages in `FAILED` state will be deleted too.
         """
-
+        if include_failed:
+            self.conn.execute(
+                f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
+            )
+            return
         self.conn.execute(
-            f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
+            f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value})"
         )
-
         return
 
     def vacuum(self):
