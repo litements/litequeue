@@ -54,7 +54,7 @@ q.get(task.message_id)
 
 ```
 
-Check out [the docs page](https://litements.exampl.io/queue/) for more.
+Check out [the docs page](https://litements.polyrand.net/queue/) for more.
 
 ## Differences with a normal Python `queue.Queue`
 
