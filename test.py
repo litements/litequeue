@@ -50,6 +50,15 @@ def qd(q) -> LiteQueue:
     return q
 
 
+@pytest.fixture(scope="function")
+def queue_with_priorities(q) -> LiteQueue:
+    q.put('firstIn', priority=1)
+    q.put('secondIn', priority=3)
+    q.put('thirdIn', priority=2)
+    q.put('fourthIn', priority=0)
+    return q
+
+
 @pytest.mark.parametrize(
     "kwargs",
     (
@@ -194,3 +203,14 @@ def test_retry_failed(q):
     assert q.get(task.message_id).status == MessageStatus.READY
     assert q.get(task.message_id).done_time is None
     assert q.qsize() == 1
+
+
+def test_priority_queue(queue_with_priorities):
+    t1 = queue_with_priorities.pop()
+    assert t1.data == "secondIn"
+    t2 = queue_with_priorities.pop()
+    assert t2.data == "thirdIn"
+    t3 = queue_with_priorities.pop()
+    assert t3.data == "firstIn"
+    t4 = queue_with_priorities.pop()
+    assert t4.data == "fourthIn"

@@ -135,6 +135,7 @@ class Message:
     in_time: int
     lock_time: Optional[int]
     done_time: Optional[int]
+    priority: int
 
 
 def validate_table_name(name: str) -> str:
@@ -155,6 +156,9 @@ class LiteQueue:
         memory: bool = False,
         maxsize: Optional[int] = None,
         queue_name: str = "Queue",
+        build_table: bool = True,
+        run_conn_pragmas: bool = True,
+        run_db_pragmas: bool = True,
         **kwargs,
     ):
         assert (filename_or_conn is not None and not memory) or (
@@ -185,6 +189,27 @@ class LiteQueue:
         validate_table_name(queue_name)
         self.table = f"[{queue_name}]"
 
+        if run_db_pragmas:
+            # pragmas like journal_mode really only should be run
+            # when the database is first created, and maybe not every time.
+            # They should also be run before tables are created.
+            self.run_db_pragmas()
+
+        if run_conn_pragmas:
+            self.run_conn_pragmas()
+
+        if build_table:
+            self.build_table()
+
+    def run_db_pragmas(self):
+        self.conn.execute("PRAGMA journal_mode = 'WAL';")
+        self.conn.execute("PRAGMA temp_store = 2;")
+
+    def run_conn_pragmas(self):
+        self.conn.execute("PRAGMA synchronous = 1;")
+        self.conn.execute(f"PRAGMA cache_size = {-1 * 64_000};")
+
+    def build_table(self):
         with self.transaction():
             # int == bool in SQLite
             # will have rowid as primary key by default
@@ -197,6 +222,7 @@ class LiteQueue:
                   , in_time    INTEGER NOT NULL
                   , lock_time  INTEGER
                   , done_time  INTEGER
+                  , priority INTEGER DEFAULT 1
                 )
                 """
             )
@@ -207,23 +233,19 @@ class LiteQueue:
             self.conn.execute(
                 f"CREATE INDEX IF NOT EXISTS SIdx ON {self.table}(status)"
             )
-
-        # if fast:
-        self.conn.execute("PRAGMA journal_mode = 'WAL';")
-        self.conn.execute("PRAGMA temp_store = 2;")
-        self.conn.execute("PRAGMA synchronous = 1;")
-        self.conn.execute(f"PRAGMA cache_size = {-1 * 64_000};")
-
+            self.conn.execute(
+                f"CREATE INDEX IF NOT EXISTS SPIdx ON {self.table}(status, priority)"
+            )
         if self.maxsize is not None:
             self.conn.execute(
                 f"""
-CREATE TRIGGER IF NOT EXISTS maxsize_control
-   BEFORE INSERT
-   ON {self.table}
-   WHEN (SELECT COUNT(*) FROM {self.table} WHERE status = {MessageStatus.READY.value}) >= {self.maxsize}
-BEGIN
-    SELECT RAISE (ABORT,'Max queue length reached: {self.maxsize}');
-END;"""
+            CREATE TRIGGER IF NOT EXISTS maxsize_control
+               BEFORE INSERT
+               ON {self.table}
+               WHEN (SELECT COUNT(*) FROM {self.table} WHERE status = {MessageStatus.READY.value}) >= {self.maxsize}
+            BEGIN
+                SELECT RAISE (ABORT,'Max queue length reached: {self.maxsize}');
+            END;"""
             )
 
     def get_sqlite_version(self) -> int:
@@ -254,7 +276,7 @@ END;"""
             # use custom locking logic
             return self._pop_transaction
 
-    def put(self, data: str) -> Message:
+    def put(self, data: str, priority: int = 1) -> Message:
         """
         Insert a new message
         """
@@ -265,10 +287,10 @@ END;"""
         _cursor = self.conn.execute(  # noqa
             f"""
             INSERT INTO
-              {self.table}(  data,  message_id, status,                      in_time, lock_time, done_time )
-            VALUES ( :data, :message_id, {MessageStatus.READY.value}, :now    , NULL     , NULL      )
+              {self.table}(  data,  message_id, status,                      in_time, lock_time, done_time, priority )
+            VALUES ( :data, :message_id, {MessageStatus.READY.value}, :now    , NULL     , NULL, :priority      )
             """.strip(),
-            {"data": data, "message_id": message_id, "now": now},
+            {"data": data, "message_id": message_id, "now": now, "priority": priority},
         )
 
         return Message(
@@ -278,6 +300,7 @@ END;"""
             in_time=now,
             lock_time=None,
             done_time=None,
+            priority=priority
         )
 
     def _pop_returning(self) -> Optional[Message]:
@@ -290,7 +313,7 @@ END;"""
                  WHERE rowid = (SELECT rowid
                                 FROM {self.table}
                                 WHERE status = {MessageStatus.READY.value}
-                                ORDER BY message_id
+                                ORDER BY priority DESC, message_id
                                 LIMIT 1)
                  RETURNING *
                  """,
@@ -328,7 +351,7 @@ END;"""
             WHERE rowid = (SELECT rowid
                            FROM {self.table}
                            WHERE status = {MessageStatus.READY.value}
-                           ORDER BY message_id
+                           ORDER BY PRIORITY DESC, message_id
                            LIMIT 1)
             """.strip()
             ).fetchone()
@@ -360,13 +383,14 @@ END;"""
                 in_time=message["in_time"],
                 lock_time=lock_time,
                 done_time=message["done_time"],
+                priority=message["priority"]
             )
 
     def peek(self) -> Optional[Message]:
         "Show next message to be popped, if any."
 
         value = self.conn.execute(
-            f"SELECT * FROM {self.table} WHERE status = {MessageStatus.READY.value} ORDER BY message_id LIMIT 1",
+            f"SELECT * FROM {self.table} WHERE status = {MessageStatus.READY.value} ORDER BY priority DESC, message_id LIMIT 1",
         ).fetchone()
 
         return Message(**value) if value is not None else None
