@@ -155,11 +155,32 @@ class LiteQueue:
         memory: bool = False,
         maxsize: Optional[int] = None,
         queue_name: str = "Queue",
+        sqlite_cache_size_bytes: int = 256_000,
         **kwargs,
     ):
+        """
+        Create a new queue.
+
+        Args:
+        - filename_or_conn: str, pathlib.Path, sqlite3.Connection
+        - memory: Whether to use an in-memory database or not (default: False)
+        - maxsize: Maximum number of messages allowed in the queue (default: None)
+        - queue_name: Name of the table that will store the messages (default: "Queue")
+        - sqlite_cache_size_bytes: Size for the SQLite cache_size in bytes (default: 256_000 [256MB])
+
+        Note, you can store multiple queues in the same database by using
+        different values for `queue_name`, but this is not tested and the
+        performance will be worse than if you have a separate database for each
+        queue. If you need multiple queues, it's recommended to just use
+        different files for each queue.
+
+        """
         assert (filename_or_conn is not None and not memory) or (
             filename_or_conn is None and memory
         ), "Either specify a filename_or_conn or pass memory=True"
+
+        assert sqlite_cache_size_bytes > 0
+        cache_n = -1 * sqlite_cache_size_bytes
 
         if memory or filename_or_conn == ":memory:":
             self.conn = sqlite3.connect(":memory:", isolation_level=None, **kwargs)
@@ -209,10 +230,10 @@ class LiteQueue:
             )
 
         # if fast:
-        self.conn.execute("PRAGMA journal_mode = 'WAL';")
-        self.conn.execute("PRAGMA temp_store = 2;")
-        self.conn.execute("PRAGMA synchronous = 1;")
-        self.conn.execute(f"PRAGMA cache_size = {-1 * 64_000};")
+        self.conn.execute("PRAGMA journal_mode = WAL;")
+        self.conn.execute("PRAGMA temp_store = MEMORY;")
+        self.conn.execute("PRAGMA synchronous = NORMAL;")
+        self.conn.execute(f"PRAGMA cache_size = {cache_n};")
 
         if self.maxsize is not None:
             self.conn.execute(
@@ -265,8 +286,9 @@ END;"""
         _cursor = self.conn.execute(  # noqa
             f"""
             INSERT INTO
-              {self.table}(  data,  message_id, status,                      in_time, lock_time, done_time )
-            VALUES ( :data, :message_id, {MessageStatus.READY.value}, :now    , NULL     , NULL      )
+              {self.table}
+                   (  data,  message_id, status,                      in_time, lock_time, done_time )
+            VALUES ( :data, :message_id, {MessageStatus.READY.value}, :now   , NULL     , NULL      )
             """.strip(),
             {"data": data, "message_id": message_id, "now": now},
         )
