@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Tuple
 
 import pytest
+
 from litequeue import LiteQueue
 from litequeue import MessageStatus
 
@@ -14,7 +15,7 @@ print(sqlite3.sqlite_version)
 
 
 @pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])
-def q(request) -> LiteQueue:
+def single_queue(request) -> LiteQueue:
     _q = LiteQueue(":memory:")
 
     if _q.get_sqlite_version() > 35:
@@ -42,7 +43,8 @@ def multi_queue(request) -> Tuple[LiteQueue, LiteQueue]:
 
 
 @pytest.fixture(scope="function")
-def qd(q) -> LiteQueue:
+def queue_with_data(single_queue) -> LiteQueue:
+    q = single_queue
     q.put("hello")
     q.put("world")
     q.put("foo")
@@ -65,7 +67,8 @@ def test_isolation_level(kwargs):
     ), f"Isolation level not set properly for connection '{kwargs}'"
 
 
-def test_insert_pop(q):
+def test_insert_pop(single_queue):
+    q = single_queue
     first = q.put("hello")
     q.put("world")
     q.put("foo")
@@ -78,20 +81,22 @@ def test_insert_pop(q):
     assert task.done_time is None
 
 
-def test_get_unknow(q):
+def test_get_unknow(single_queue):
+    q = single_queue
     assert q.get("nothing") is None
 
 
-def test_pop_all_locked(qd):
+def test_pop_all_locked(queue_with_data):
+    q = queue_with_data
     # Lock every message
     for _ in range(4):
-        qd.pop()
+        q.pop()
 
-    assert qd.pop() is None
+    assert q.pop() is None
 
 
-def test_basic_actions(qd):
-    q = qd
+def test_basic_actions(queue_with_data):
+    q = queue_with_data
 
     task = q.pop()
     assert task.data == "hello"
@@ -115,8 +120,8 @@ def test_basic_actions(qd):
     )
 
 
-def test_queue_size(qd):
-    q = qd
+def test_queue_size(queue_with_data):
+    q = queue_with_data
 
     assert q.qsize() == 4
     task = q.pop()
@@ -127,8 +132,8 @@ def test_queue_size(qd):
     assert q.qsize() == 5
 
 
-def test_prune(qd):
-    q = qd
+def test_prune(queue_with_data):
+    q = queue_with_data
     while not q.empty():
         t = q.pop()
         q.done(t.message_id)
@@ -158,14 +163,16 @@ def test_max_size():
     assert not q.full()
 
 
-def test_empty(qd):
-    assert qd.empty() is False
+def test_empty(queue_with_data):
+    q = queue_with_data
+    assert q.empty() is False
 
     q2 = LiteQueue(":memory:")
     assert q2.empty() is True
 
 
-def test_list_locked(q):
+def test_list_locked(single_queue):
+    q = single_queue
     q.put("foo")
 
     task = q.pop()
@@ -180,7 +187,8 @@ def test_list_locked(q):
     assert len(list(q.list_locked(threshold_seconds=0.1))) == 0
 
 
-def test_retry_failed(q):
+def test_retry_failed(single_queue):
+    q = single_queue
     q.put("foo")
 
     task = q.pop()
