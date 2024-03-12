@@ -19,7 +19,7 @@ _DKW: Dict[str, Any] = {}
 if sys.version_info >= (3, 10):
     _DKW["slots"] = True
 
-__version__ = "0.7"
+__version__ = "0.8"
 
 # Extracted from https://github.com/stevesimmons/uuid7 under MIT license
 
