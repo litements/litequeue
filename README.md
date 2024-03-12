@@ -75,6 +75,49 @@ different usage scenarios.
 The `benchmark.ipynb` file contains some benchmarks comparing `litequeue` to
 the built-in Python `queue.Queue`.
 
+## Multiple queues in the same DB file
+
+In the `LiteQueue` class, the `filename_or_conn` parameter defines the SQLite
+file that will be used to store the messages, the `queue_name` parameter is used
+to define the table name that will be used to store the messages.
+
+Multiple queues in the same SQLite is supported, but it's neither tested nor
+recommended. But if you need it, you can use different `queue_name` values when
+initializing the `LiteQueue` object to store multiple queues in the same DB
+file.
+
+```python
+import tempfile
+import litequeue
+
+
+with tempfile.TemporaryDirectory() as tmpdirname:
+
+    db_path = tmpdirname + "/test.sqlite3"
+
+    q1 = litequeue.LiteQueue(db_path, queue_name="q1")
+    q2 = litequeue.LiteQueue(db_path, queue_name="q2")
+
+    q1.put("a")
+    q1.put("b")
+
+    print("Q1 size", q1.qsize())
+
+    print("Q2 size", q2.qsize())
+
+    q2.put("c")
+    q2.put("d")
+
+    print("Q2 size", q2.qsize())
+
+    print(q1.pop())
+    print(q1.peek())
+
+    print(q2.peek())
+    print(q2.pop())
+
+```
+
 ## Meta
 
 Ricardo Ander-Egg Aguilar – [@ricardoanderegg](https://twitter.com/ricardoanderegg) –
