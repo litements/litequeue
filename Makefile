@@ -18,7 +18,7 @@ help: ## Display this message
 
 
 
-.venv:  ## Create venv
+.venv: ## Create venv
 	python3 -m venv .venv
 	$(pip) install -U pip setuptools
 	touch .venv
@@ -37,7 +37,7 @@ dist:  ## Build package for distribution
 	$(py) -m build --sdist --wheel --outdir dist/ .
 
 .PHONY: clean
-clean:  ## Clean artifacts
+clean: ## Clean artifacts
 	@rm -rf *.egg-info/ build/ dist/
 
 
