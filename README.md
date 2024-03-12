@@ -17,8 +17,12 @@ method, it will remove all the finished tasks from the database.
 
 ## Installation
 
+Create a virtual environment if you are alredy not inside one and install the
+package using pip:
+
 ```
-pip install litequeue
+python3 -m venv .venv
+python3 -m pip --require-virtualenv install --upgrade litequeue
 ```
 
 ## Quickstart
@@ -96,3 +100,4 @@ The only hard rules for the project are:
 - No extra dependencies allowed
 - No extra files, everything must be inside `litequeue.py` file.
 - Tests must be inside the `test.py` file.
+- Files must be formatted using `black` and `isort`, using one import per line.
