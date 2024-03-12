@@ -2,8 +2,8 @@ name: Publish Python distribution to PyPI
 on:
   push:
     # Sequence of patterns matched against refs/heads
-    # branches:
-    #   - main
+    branches:
+      - main
     # Sequence of patterns matched against refs/tags
     tags:
       - v0.*
