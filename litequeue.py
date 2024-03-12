@@ -203,8 +203,8 @@ class LiteQueue:
 
         self.pop: Callable = self._select_pop_func()
 
-        validate_table_name(queue_name)
-        self.table = f"[{queue_name}]"
+        validated_name = validate_table_name(queue_name)
+        self.table = f"[{validated_name}]"
 
         with self.transaction():
             # int == bool in SQLite
@@ -238,7 +238,7 @@ class LiteQueue:
         if self.maxsize is not None:
             self.conn.execute(
                 f"""
-CREATE TRIGGER IF NOT EXISTS maxsize_control
+CREATE TRIGGER IF NOT EXISTS maxsize_control_{validated_name}
    BEFORE INSERT
    ON {self.table}
    WHEN (SELECT COUNT(*) FROM {self.table} WHERE status = {MessageStatus.READY.value}) >= {self.maxsize}
