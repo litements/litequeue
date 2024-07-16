@@ -84,7 +84,7 @@ def uuid7(
     last = _last
 
     if ns == 0:
-        # Special cose for all-zero uuid. Strictly speaking not a UUIDv7.
+        # Special case for all-zero uuid. Strictly speaking not a UUIDv7.
         t1 = t2 = t3 = t4 = 0
         rand = b"\0" * 6
     else:
