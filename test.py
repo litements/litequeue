@@ -18,7 +18,10 @@ def queue_name(request) -> str:
 
 @pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])
 def single_queue(request, queue_name) -> LiteQueue:
-    _q = LiteQueue(":memory:")
+    kwargs = {'filename_or_conn': ':memory:'}
+    if queue_name is not None:
+        kwargs['queue_name'] = queue_name
+    _q = LiteQueue(**kwargs)
 
     if _q.get_sqlite_version() > 35:
         _q.pop = getattr(_q, request.param)
@@ -125,7 +128,7 @@ def test_prune(queue_with_data):
 
     assert (
         q.conn.execute(
-            f"SELECT * FROM Queue WHERE status = {MessageStatus.DONE.value}"
+            f"SELECT * FROM {q.table} WHERE status = {MessageStatus.DONE.value}"
         ).fetchall()
         == []
     )
