@@ -17,21 +17,16 @@ help: ## Display this message
 		awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-38s\033[0m %s\n", $$1, $$2}'
 
 
-
 .venv: ## Create venv
 	python3 -m venv .venv
 	$(pip) install -U pip setuptools
+	@$(pip) install -U wheel build twine black mypy ruff pytest
+	@$(pip) install -U --force-reinstall --use-pep517 -e .
 	touch .venv
 
 
-
-.init: .venv
-	@$(pip) install -U wheel build twine black mypy ruff pytest
-	@$(pip) install -U --force-reinstall -e .
-	touch .init
-
 .PHONY: install
-install: .init ## Create .venv and install basic packages
+install: .venv ## Create .venv and install basic packages
 
 dist:  ## Build package for distribution
 	$(py) -m build --sdist --wheel --outdir dist/ .
@@ -48,13 +43,13 @@ fix:  ## Run ruff and black
 
 
 .PHONY: test
-test: .venv .init  ## Run tests
+test: .venv  ## Run tests
 	$(py) -m pytest test.py
 
 
 .PHONY: publish
 publish: TWINE_USERNAME = __token__
-publish: .init dist  ## Publish to PyPi
+publish: .venv dist  ## Publish to PyPi
 	$(venv_bin)/twine check dist/*
 	$(venv_bin)/twine upload --non-interactive dist/*
 	
