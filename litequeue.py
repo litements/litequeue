@@ -469,7 +469,7 @@ END;"""
 
         cursor = self.conn.execute(
             f"""
-            SELECT * FROM Queue
+            SELECT * FROM {self.table}
             WHERE
               status = {MessageStatus.FAILED.value}
             """.strip()
@@ -546,11 +546,11 @@ END;"""
         """
         if include_failed:
             self.conn.execute(
-                f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
+                f"DELETE FROM {self.table} WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
             )
         else:
             self.conn.execute(
-                f"DELETE FROM Queue WHERE status IN ({MessageStatus.DONE.value})"
+                f"DELETE FROM {self.table} WHERE status IN ({MessageStatus.DONE.value})"
             )
 
     def vacuum(self):

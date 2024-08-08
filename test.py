@@ -11,9 +11,17 @@ print(sqlite3.sqlite_version)
 # https://docs.pytest.org/en/7.1.x/how-to/fixtures.html#parametrizing-fixtures
 
 
+@pytest.fixture(scope="function", params=[None, "CustomQueue"], ids=["table_name=<Default>", "table_name=CustomQueue"])
+def queue_name(request) -> str:
+    return request.param
+
+
 @pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])
-def single_queue(request) -> LiteQueue:
-    _q = LiteQueue(":memory:")
+def single_queue(request, queue_name) -> LiteQueue:
+    kwargs = {'filename_or_conn': ':memory:'}
+    if queue_name is not None:
+        kwargs['queue_name'] = queue_name
+    _q = LiteQueue(**kwargs)
 
     if _q.get_sqlite_version() > 35:
         _q.pop = getattr(_q, request.param)
@@ -120,7 +128,7 @@ def test_prune(queue_with_data):
 
     assert (
         q.conn.execute(
-            f"SELECT * FROM Queue WHERE status = {MessageStatus.DONE.value}"
+            f"SELECT * FROM {q.table} WHERE status = {MessageStatus.DONE.value}"
         ).fetchall()
         == []
     )
@@ -181,3 +189,13 @@ def test_retry_failed(single_queue):
     assert q.get(task.message_id).status == MessageStatus.READY
     assert q.get(task.message_id).done_time is None
     assert q.qsize() == 1
+
+
+def test_count_failed(single_queue):
+    q = single_queue
+
+    q.put("foot")
+    task = q.pop()
+    q.mark_failed(task.message_id)
+
+    assert len(list(q.list_failed())) == 1
