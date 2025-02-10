@@ -13,7 +13,6 @@ from typing import Dict
 from typing import Iterable
 from typing import Optional
 from typing import Union
-from typing import cast
 
 _DKW: Dict[str, Any] = {}
 if sys.version_info >= (3, 10):
@@ -280,7 +279,7 @@ END;"""
         Insert a new message
         """
         # timeout: int = None
-        message_id: str = cast(str, uuid7())
+        message_id: str = uuid7()
         now = time_ns()
 
         _cursor = self.conn.execute(  # noqa
