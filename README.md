@@ -41,7 +41,14 @@ q.put("world")
 task = q.pop()
 
 print(task)
-# Message(data='hello', message_id='063e95f1-3d9e-7bbc-8000-a6a18a5f65d1', status=1, in_time=1676238611851279408, lock_time=1676238623180543854, done_time=None)
+# Message(
+#     data='hello',
+#     message_id='063e95f1-3d9e-7bbc-8000-a6a18a5f65d1',
+#     status=1,
+#     in_time=1676238611851279408,
+#     lock_time=1676238623180543854,
+#     done_time=None
+# )
 
 q.done(task.message_id)
 
@@ -53,7 +60,7 @@ q.get(task.message_id)
 #     status=2,                <---- status is now 2 (DONE)
 #     in_time=1676238611851279408,
 #     lock_time=1676238623180543854,
-#     done_time=1676238641276753673
+#     done_time=1676238641276753673  <---- done_time contains timestamp now
 # )
 
 ```
