@@ -14,7 +14,8 @@ help: ## Display this message
 
 .PHONY: install
 install: ## Create the environment and install development dependencies
-	uv sync --group dev
+	uv python install 3.12
+	uv sync --python 3.12 --group dev
 
 .PHONY: dist
 dist: ## Build source and wheel distributions

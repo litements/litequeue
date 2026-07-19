@@ -84,8 +84,8 @@ built-in Python `queue.Queue`. Run it with `make benchmark`.
 
 ## Development
 
-Run `make install` to create the uv-managed environment and install the
-development dependencies. Run the test suite with `make test`.
+Run `make install` to install Python 3.12, create the uv-managed environment,
+and install the development dependencies. Run the test suite with `make test`.
 
 Publishing is intentionally local-only. Export `UV_PUBLISH_TOKEN`, then run
 `make publish`. The target runs the tests, bumps the minor version, builds the
