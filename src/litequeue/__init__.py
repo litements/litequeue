@@ -2,23 +2,12 @@ import os
 import pathlib
 import pprint
 import sqlite3
-import sys
 import time
+from collections.abc import Callable
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
-from typing import Callable
-from typing import Dict
-from typing import Iterable
-from typing import Optional
-from typing import Union
-
-_DKW: Dict[str, Any] = {}
-if sys.version_info >= (3, 10):
-    _DKW["slots"] = True
-
-__version__ = "0.9"
 
 # Extracted from https://github.com/stevesimmons/uuid7 under MIT license
 
@@ -126,14 +115,17 @@ class MessageStatus(int, Enum):
     FAILED = 3
 
 
-@dataclass(frozen=True, **_DKW)
+@dataclass(frozen=True, slots=True)
 class Message:
     data: str
     message_id: str  # UUID v7
     status: MessageStatus
     in_time: int
-    lock_time: Optional[int]
-    done_time: Optional[int]
+    lock_time: int | None
+    done_time: int | None
+
+
+type PopFunction = Callable[[], Message | None]
 
 
 def validate_table_name(name: str) -> str:
@@ -150,13 +142,13 @@ def validate_table_name(name: str) -> str:
 class LiteQueue:
     def __init__(
         self,
-        filename_or_conn: Optional[Union[sqlite3.Connection, str, pathlib.Path]] = None,
+        filename_or_conn: sqlite3.Connection | str | pathlib.Path | None = None,
         memory: bool = False,
-        maxsize: Optional[int] = None,
+        maxsize: int | None = None,
         queue_name: str = "Queue",
         sqlite_cache_size_bytes: int = 256_000,
         **kwargs,
-    ):
+    ) -> None:
         """
         Create a new queue.
 
@@ -200,7 +192,7 @@ class LiteQueue:
         self.maxsize = int(maxsize) if maxsize is not None else maxsize
         self.conn.row_factory = sqlite3.Row
 
-        self.pop: Callable = self._select_pop_func()
+        self.pop: PopFunction = self._select_pop_func()
 
         validated_name = validate_table_name(queue_name)
         self.table = f"[{validated_name}]"
@@ -257,7 +249,7 @@ END;"""
 
         return v_min
 
-    def _select_pop_func(self) -> Callable:
+    def _select_pop_func(self) -> PopFunction:
         """
         Decide which message pop() logic to use
         depending on the sqlite version.
@@ -301,7 +293,7 @@ END;"""
             done_time=None,
         )
 
-    def _pop_returning(self) -> Optional[Message]:
+    def _pop_returning(self) -> Message | None:
         # this should happen all inside a single transaction
         with self.transaction(mode="IMMEDIATE"):
             message = self.conn.execute(
@@ -323,7 +315,7 @@ END;"""
 
             return Message(**message)
 
-    def _pop_transaction(self) -> Optional[Message]:
+    def _pop_transaction(self) -> Message | None:
         """
         Pop from the queue using a transaction and custom locking logic.
         This function should be used with SQLite versions < 3.35.0
@@ -383,7 +375,7 @@ END;"""
                 done_time=message["done_time"],
             )
 
-    def peek(self) -> Optional[Message]:
+    def peek(self) -> Message | None:
         "Show next message to be popped, if any."
 
         value = self.conn.execute(
@@ -392,7 +384,7 @@ END;"""
 
         return Message(**value) if value is not None else None
 
-    def get(self, message_id: str) -> Optional[Message]:
+    def get(self, message_id: str) -> Message | None:
         "Get a message by its `message_id`"
 
         value = self.conn.execute(
@@ -402,7 +394,7 @@ END;"""
 
         return Message(**value) if value is not None else None
 
-    def done(self, message_id) -> Optional[int]:
+    def done(self, message_id: str) -> int | None:
         """
         Mark message as done.
         If executed multiple times, `done_time` will be
@@ -423,7 +415,7 @@ END;"""
 
         return x
 
-    def mark_failed(self, message_id) -> Optional[int]:
+    def mark_failed(self, message_id: str) -> int | None:
         """
         Mark a message as failed.
         """
@@ -440,7 +432,7 @@ END;"""
 
         return x
 
-    def list_locked(self, threshold_seconds: int) -> Iterable[Message]:
+    def list_locked(self, threshold_seconds: int) -> Iterator[Message]:
         """
         Return all the tasks that have been in the `LOCKED` state for more than
         `threshold_seconds` seconds.
@@ -461,7 +453,7 @@ END;"""
         for result in cursor:
             yield Message(**result)
 
-    def list_failed(self) -> Iterable[Message]:
+    def list_failed(self) -> Iterator[Message]:
         """
         Return all the tasks in `FAILED` state.
         """
@@ -477,7 +469,7 @@ END;"""
         for result in cursor:
             yield Message(**result)
 
-    def retry(self, message_id) -> Optional[int]:
+    def retry(self, message_id: str) -> int | None:
         """
         Mark a locked message as free again.
         """
@@ -537,7 +529,7 @@ END;"""
         else:
             return False
 
-    def prune(self, include_failed: bool = True):
+    def prune(self, include_failed: bool = True) -> None:
         """
         Delete `DONE` messages.
 
@@ -552,7 +544,7 @@ END;"""
                 f"DELETE FROM {self.table} WHERE status IN ({MessageStatus.DONE.value})"
             )
 
-    def vacuum(self):
+    def vacuum(self) -> None:
         """
         Vacuum the database.
 
@@ -564,7 +556,7 @@ END;"""
     # SQLite works better in autocommit mode when using short DML (INSERT /
     # UPDATE / DELETE) statements
     @contextmanager
-    def transaction(self, mode="DEFERRED"):
+    def transaction(self, mode: str = "DEFERRED") -> Iterator[None]:
         if mode not in {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}:
             raise ValueError(f"Transaction mode '{mode}' is not valid")
         # We must issue a "BEGIN" explicitly when running in auto-commit mode.
@@ -578,14 +570,14 @@ END;"""
         else:
             self.conn.commit()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         display_items = [
             Message(**x)
             for x in self.conn.execute(f"SELECT * FROM {self.table} LIMIT 3").fetchall()
         ]
         return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat(display_items)})"
 
-    def close(self):
+    def close(self) -> None:
         self.conn.close()
 
 

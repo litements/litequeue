@@ -1,0 +1,35 @@
+[project]
+name = "litequeue"
+version = "0.10"
+description = "Simple queue built on top of SQLite"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Ricardo Ander-Egg Aguilar", email = "rsubacc@gmail.com" },
+]
+classifiers = [
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/litements/litequeue"
+Repository = "https://github.com/litements/litequeue"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.1.1",
+]
+
+[tool.uv]
+exclude-newer = "1 week"
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

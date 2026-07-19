@@ -17,13 +17,13 @@ method, it will remove all the finished tasks from the database.
 
 ## Installation
 
-Create a virtual environment if you are alredy not inside one and install the
-package using pip:
+Install the package with uv:
 
 ```
-python3 -m venv .venv
-python3 -m pip --require-virtualenv install --upgrade litequeue
+uv add litequeue
 ```
+
+Python 3.12 or newer is required.
 
 ## Quickstart
 
@@ -74,13 +74,22 @@ Check out [the docs page](https://litements.polyrand.net/queue/) for more.
 - Timing metrics. As long as tasks are still in the queue or not pruned, you can see how long they have been there or how long they took to finish.
 - Easy to extend using SQL
 
-## Examples and bechmarks and bechmarks
+## Examples and benchmarks
 
-You can have a look at the `test.py` file. The tests are short and showcase
+You can have a look at the `tests/` folder. The tests are short and showcase
 different usage scenarios.
 
-The `benchmark.ipynb` file contains some benchmarks comparing `litequeue` to
-the built-in Python `queue.Queue`.
+The `benchmark.py` script contains benchmarks comparing `litequeue` to the
+built-in Python `queue.Queue`. Run it with `make benchmark`.
+
+## Development
+
+Run `make install` to create the uv-managed environment and install the
+development dependencies. Run the test suite with `make test`.
+
+Publishing is intentionally local-only. Export `UV_PUBLISH_TOKEN`, then run
+`make publish`. The target runs the tests, bumps the minor version, builds the
+distributions, and uploads them with uv.
 
 ## Multiple queues in the same DB file
 
@@ -147,7 +156,6 @@ Distributed under the MIT license. See `LICENSE` for more information.
 
 The only hard rules for the project are:
 
-- No extra dependencies allowed
-- No extra files, everything must be inside `litequeue.py` file.
-- Tests must be inside the `test.py` file.
-- Files must be formatted using `black` and `isort`, using one import per line.
+- No runtime dependencies allowed.
+- Package code lives under `src/litequeue/`.
+- Tests live under `tests/`.
