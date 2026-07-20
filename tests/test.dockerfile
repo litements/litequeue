@@ -19,24 +19,19 @@ WORKDIR /build
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --group dev
 
-ARG SQLITE_VERSION
-ARG SQLITE_YEAR
-ARG SQLITE_ARCHIVE_VERSION
-RUN sqlite_url="https://www.sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_ARCHIVE_VERSION}.tar.gz" \
-    && curl -LsSf "$sqlite_url" -o /tmp/sqlite.tar.gz \
-    && mkdir -p /tmp/sqlite-source \
-    && tar -xzf /tmp/sqlite.tar.gz --strip-components=1 -C /tmp/sqlite-source \
-    && cd /tmp/sqlite-source \
-    && CPPFLAGS=-DSQLITE_ENABLE_DESERIALIZE ./configure --prefix=/opt/sqlite --disable-static \
-    && make -j2 \
-    && make install \
-    && rm -rf /tmp/sqlite-source /tmp/sqlite.tar.gz
-
-ENV LD_LIBRARY_PATH=/opt/sqlite/lib
-ENV LD_PRELOAD=/opt/sqlite/lib/libsqlite3.so.0
-
-RUN actual_version=$(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)') \
-    && test "$actual_version" = "$SQLITE_VERSION"
+COPY tests/build_sqlite.sh /usr/local/bin/build-sqlite
+ARG SQLITE_RELEASES
+RUN test -n "$SQLITE_RELEASES" \
+    && for sqlite_release in $SQLITE_RELEASES; do \
+        sqlite_version="${sqlite_release%%:*}"; \
+        release_tail="${sqlite_release#*:}"; \
+        sqlite_year="${release_tail%%:*}"; \
+        sqlite_archive_version="${release_tail#*:}"; \
+        bash /usr/local/bin/build-sqlite \
+            "$sqlite_version" \
+            "$sqlite_year" \
+            "$sqlite_archive_version"; \
+    done
 
 ENV PYTHONPATH=/workspace/src
 WORKDIR /workspace

@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,7 @@ SQLITE_RELEASES = (
 
 CONTAINER_PROJECT_PATH = "/workspace"
 DOCKERFILE_PATH = "tests/test.dockerfile"
+IMAGE_TAG = "litequeue-sqlite-matrix:latest"
 
 
 def require_success(result: ExecResult, action: str) -> str:
@@ -35,20 +37,44 @@ def require_success(result: ExecResult, action: str) -> str:
     return output
 
 
+def get_sqlite_build_argument() -> str:
+    """Serialize the Python release matrix for the Docker build."""
+    release_arguments = [
+        f"{release.version}:{release.year}:{release.archive_version}"
+        for release in SQLITE_RELEASES
+    ]
+    return " ".join(release_arguments)
+
+
+@pytest.fixture(scope="module")
+def sqlite_test_image() -> Iterator[str]:
+    """Build the reusable image containing every supported SQLite release."""
+    project_path = Path(__file__).resolve().parents[1]
+    build_arguments = {"SQLITE_RELEASES": get_sqlite_build_argument()}
+    image = DockerImage(
+        path=project_path,
+        dockerfile_path=DOCKERFILE_PATH,
+        tag=IMAGE_TAG,
+        clean_up=False,
+        buildargs=build_arguments,
+    )
+
+    with image:
+        yield str(image)
+
+
 @pytest.mark.parametrize(
     "release",
     SQLITE_RELEASES,
     ids=[release.version for release in SQLITE_RELEASES],
 )
-def test_suite_passes_with_sqlite_release(release: SQLiteRelease) -> None:
-    """Compile a SQLite release on Debian and run the test suite against it."""
+def test_suite_passes_with_sqlite_release(
+    release: SQLiteRelease,
+    sqlite_test_image: str,
+) -> None:
+    """Run the test suite with one SQLite release from the matrix image."""
     project_path = Path(__file__).resolve().parents[1]
-    image_tag = f"litequeue-sqlite:{release.version}"
-    build_arguments = {
-        "SQLITE_VERSION": release.version,
-        "SQLITE_YEAR": str(release.year),
-        "SQLITE_ARCHIVE_VERSION": str(release.archive_version),
-    }
+    sqlite_prefix = f"/opt/sqlite/{release.version}"
     test_script = f"""
 set -eu
 cd {CONTAINER_PROJECT_PATH}
@@ -58,25 +84,24 @@ test "$actual_version" = "{release.version}"
 uv run --no-sync pytest tests --ignore=tests/test_sqlite_versions.py
 """
 
-    image = DockerImage(
-        path=project_path,
-        dockerfile_path=DOCKERFILE_PATH,
-        tag=image_tag,
-        clean_up=False,
-        buildargs=build_arguments,
+    container = DockerContainer(image=sqlite_test_image)
+    container.with_env(
+        key="LD_LIBRARY_PATH",
+        value=f"{sqlite_prefix}/lib",
+    )
+    container.with_env(
+        key="LD_PRELOAD",
+        value=f"{sqlite_prefix}/lib/libsqlite3.so.0",
+    )
+    container.with_volume_mapping(
+        host=project_path,
+        container=CONTAINER_PROJECT_PATH,
+        mode="ro",
     )
 
-    with image:
-        container = DockerContainer(image=str(image))
-        container.with_volume_mapping(
-            host=project_path,
-            container=CONTAINER_PROJECT_PATH,
-            mode="ro",
+    with container:
+        test_result = container.exec(command=["sh", "-c", test_script])
+        require_success(
+            result=test_result,
+            action=f"testing SQLite {release.version}",
         )
-
-        with container:
-            test_result = container.exec(command=["sh", "-c", test_script])
-            require_success(
-                result=test_result,
-                action=f"testing SQLite {release.version}",
-            )

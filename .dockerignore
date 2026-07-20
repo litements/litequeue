@@ -3,4 +3,5 @@
 !uv.lock
 !tests/
 tests/*
+!tests/build_sqlite.sh
 !tests/test.dockerfile
