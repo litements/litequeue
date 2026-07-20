@@ -605,6 +605,31 @@ def test_retry_failed(single_queue):
     assert q.qsize() == 1
 
 
+def test_done_returns_whether_message_exists(single_queue: LiteQueue) -> None:
+    q = single_queue
+    task = q.put("foo")
+
+    assert q.done(task.message_id) is True
+    assert q.done("missing-message") is False
+
+
+def test_mark_failed_returns_whether_message_exists(single_queue: LiteQueue) -> None:
+    q = single_queue
+    task = q.put("foo")
+
+    assert q.mark_failed(task.message_id) is True
+    assert q.mark_failed("missing-message") is False
+
+
+def test_retry_returns_whether_message_exists(single_queue: LiteQueue) -> None:
+    q = single_queue
+    task = q.put("foo")
+    q.mark_failed(task.message_id)
+
+    assert q.retry(task.message_id) is True
+    assert q.retry("missing-message") is False
+
+
 def test_count_failed(single_queue):
     q = single_queue
 

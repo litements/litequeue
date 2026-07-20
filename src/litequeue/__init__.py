@@ -462,16 +462,18 @@ END;"""
 
         return Message(**value) if value is not None else None
 
-    def done(self, message_id: str) -> int | None:
+    def done(self, message_id: str) -> bool:
         """
         Mark message as done.
         If executed multiple times, `done_time` will be
         the last time this function is called.
+
+        Return `True` when the message exists, otherwise `False`.
         """
 
         now = time_ns()
 
-        x = self.conn.execute(
+        cursor = self.conn.execute(
             f"""
             UPDATE {self.table} SET
               status = {MessageStatus.DONE.value}
@@ -479,16 +481,18 @@ END;"""
             WHERE message_id = :message_id
             """.strip(),
             {"now": now, "message_id": message_id},
-        ).lastrowid
+        )
 
-        return x
+        return cursor.rowcount > 0
 
-    def mark_failed(self, message_id: str) -> int | None:
+    def mark_failed(self, message_id: str) -> bool:
         """
         Mark a message as failed.
+
+        Return `True` when the message exists, otherwise `False`.
         """
 
-        x = self.conn.execute(
+        cursor = self.conn.execute(
             f"""
             UPDATE {self.table} SET
               status = {MessageStatus.FAILED.value}
@@ -496,9 +500,9 @@ END;"""
             WHERE message_id = :message_id
             """.strip(),
             {"now": time_ns(), "message_id": message_id},
-        ).lastrowid
+        )
 
-        return x
+        return cursor.rowcount > 0
 
     def list_locked(self, threshold_seconds: int) -> Iterator[Message]:
         """
@@ -537,12 +541,14 @@ END;"""
         for result in cursor:
             yield Message(**result)
 
-    def retry(self, message_id: str) -> int | None:
+    def retry(self, message_id: str) -> bool:
         """
         Mark a locked message as free again.
+
+        Return `True` when the message exists, otherwise `False`.
         """
 
-        x = self.conn.execute(
+        cursor = self.conn.execute(
             f"""
             UPDATE {self.table} SET
               status = {MessageStatus.READY.value}
@@ -550,9 +556,9 @@ END;"""
             WHERE message_id = :message_id
             """.strip(),
             {"message_id": message_id},
-        ).lastrowid
+        )
 
-        return x
+        return cursor.rowcount > 0
 
     def qsize(self) -> int:
         """
