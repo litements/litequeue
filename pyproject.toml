@@ -5,9 +5,7 @@ description = "Simple queue built on top of SQLite"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
-authors = [
-    { name = "Ricardo Ander-Egg Aguilar", email = "rsubacc@gmail.com" },
-]
+authors = [{ name = "Ricardo Ander-Egg Aguilar", email = "rsubacc@gmail.com" }]
 classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -20,9 +18,7 @@ Homepage = "https://github.com/litements/litequeue"
 Repository = "https://github.com/litements/litequeue"
 
 [dependency-groups]
-dev = [
-    "pytest>=8.1.1",
-]
+dev = ["pytest>=8.1.1"]
 
 [tool.uv]
 exclude-newer = "1 week"
@@ -33,3 +29,20 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.ruff.lint]
+select = ["F", "I"]
+extend-select = ["Q", "RUF018", "RUF100", "TID251", "UP"]
+flake8-quotes = { inline-quotes = "double", multiline-quotes = "double" }
+
+
+[tool.mypy]
+pretty = true
+show_error_codes = true
+follow_untyped_imports = true
+check_untyped_defs = true
+no_implicit_optional = true
+cache_fine_grained = true
