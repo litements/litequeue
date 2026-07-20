@@ -15,11 +15,7 @@ Messages are interpreted as tasks, so after you `pop` a message, you need to
 mark it as done when you finish processing it. When you run the `.prune()`
 method, it will remove all the finished tasks from the database.
 
-Message IDs follow RFC 9562 UUIDv7: their first 48 bits contain the Unix
-timestamp in milliseconds. Queues created by older LiteQueue versions may
-contain IDs from an earlier UUIDv7 draft. Those IDs remain valid and can coexist
-with RFC UUIDv7 IDs, but the queue sorts lexically by `message_id`. New RFC
-UUIDv7 values can therefore sort before older draft-format IDs.
+Message IDs follow RFC 9562 UUIDv7.
 
 ## Installation
 
@@ -75,8 +71,6 @@ q.get(task.message_id)
 
 ```
 
-Check out [the docs page](https://litements.polyrand.net/queue/) for more.
-
 ## Differences with a normal Python `queue.Queue`
 
 - Persistence
@@ -131,15 +125,6 @@ different usage scenarios.
 The `benchmark.py` script contains benchmarks comparing `litequeue` to the
 built-in Python `queue.Queue`. Run it with `make benchmark`.
 
-## Development
-
-Run `make install` to create the uv-managed environment and install the
-development dependencies. Run the test suite with `make test`.
-
-Publishing is intentionally local-only. Export `UV_PUBLISH_TOKEN`, then run
-`make publish`. The target runs the tests, bumps the minor version, builds the
-distributions, and uploads them with uv.
-
 ## One queue per database
 
 Each LiteQueue queue uses its own SQLite database. Pass `name="email"` to create
@@ -167,14 +152,23 @@ changing their schema. The old `queue_name` argument is no longer supported;
 create a separate `.queue.sqlite3` database for each queue instead. LiteQueue
 does not automatically migrate shared or custom-table databases.
 
-## Meta
+## Contributing
 
-Ricardo Ander-Egg Aguilar – [@ricardoanderegg](https://twitter.com/ricardoanderegg) –
+The only hard rules for the project are:
 
-- [ricardoanderegg.com](http://ricardoanderegg.com/)
-- [github.com/polyrand](https://github.com/polyrand/)
+- No runtime dependencies allowed.
+- Package code lives under `src/litequeue/`.
+- Tests live under `tests/`.
 
-Distributed under the MIT license. See `LICENSE` for more information.
+## Development
+
+Run `make install` to create the uv-managed environment and install the
+development dependencies. Run the test suite with `make test`, static type
+checks with `make typecheck`, and lint checks with `make lint`.
+
+Publishing is intentionally local-only. Export `UV_PUBLISH_TOKEN`, then run
+`make publish`. The target runs the tests, bumps the minor version, builds the
+distributions, and uploads them with uv.
 
 ## Important changes
 
@@ -188,10 +182,11 @@ Distributed under the MIT license. See `LICENSE` for more information.
   - Message IDs are uuidv7 strings.
 - In version 0.4 the database schema has changed and the column `task_id` is now `message_id`.
 
-## Contributing
+## Meta
 
-The only hard rules for the project are:
+Ricardo – [@ricardoanderegg](https://twitter.com/ricardoanderegg) –
 
-- No runtime dependencies allowed.
-- Package code lives under `src/litequeue/`.
-- Tests live under `tests/`.
+- [ricardoanderegg.com](http://ricardoanderegg.com/)
+- [github.com/polyrand](https://github.com/polyrand/)
+
+Distributed under the MIT license. See `LICENSE` for more information.
