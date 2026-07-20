@@ -213,6 +213,8 @@ class LiteQueue:
         if not queue_folder.is_dir():
             raise ValueError("folder must be an existing directory")
 
+        self.pop: PopFunction = self._select_pop_func()
+
         database_filename = queue_folder / f"{name}.queue.sqlite3"
         self.conn = sqlite3.connect(
             database=str(database_filename),
@@ -225,8 +227,6 @@ class LiteQueue:
         )
 
         self.conn.row_factory = sqlite3.Row
-
-        self.pop: PopFunction = self._select_pop_func()
 
         self.table = f'"{_QUEUE_TABLE_NAME}"'
 
@@ -363,22 +363,27 @@ END;"""
         stored_maxsize = int(match.group(1))
         return validate_maxsize(stored_maxsize)
 
-    def get_sqlite_version(self) -> int:
-        sqlite_ver = sqlite3.sqlite_version_info
+    def get_sqlite_version(self) -> tuple[int, int, int]:
+        """Return the SQLite version or reject unsupported major versions."""
+        sqlite_version_info = sqlite3.sqlite_version_info
+        major_version = int(sqlite_version_info[0])
+        minor_version = int(sqlite_version_info[1])
+        patch_version = int(sqlite_version_info[2])
+        sqlite_version = (major_version, minor_version, patch_version)
 
-        v_major = int(sqlite_ver[0])
-        v_min = int(sqlite_ver[1])
-        # _v_bug = int(sqlite_ver[2])
+        if major_version != 3:
+            formatted_version = ".".join(str(part) for part in sqlite_version)
+            raise RuntimeError(
+                f"LiteQueue requires SQLite 3; found SQLite {formatted_version}"
+            )
 
-        assert v_major == 3
-
-        return v_min
+        return sqlite_version
 
     def _select_pop_func(self) -> PopFunction:
         """Select the fastest pop implementation supported by SQLite."""
-        sqlite_minor_version = self.get_sqlite_version()
+        sqlite_version = self.get_sqlite_version()
 
-        if sqlite_minor_version >= 35:
+        if sqlite_version >= (3, 35, 0):
             return self._pop_returning
 
         return self._pop_transaction

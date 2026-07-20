@@ -150,8 +150,9 @@ def queue_with_data(single_queue) -> LiteQueue:
 @pytest.mark.parametrize(
     ("sqlite_version", "expected_pop_method"),
     (
-        ((3, 34, 0), "_pop_transaction"),
+        ((3, 34, 99), "_pop_transaction"),
         ((3, 35, 0), "_pop_returning"),
+        ((3, 35, 1), "_pop_returning"),
     ),
 )
 def test_selects_pop_method_for_sqlite_features(
@@ -166,6 +167,37 @@ def test_selects_pop_method_for_sqlite_features(
     queue = LiteQueue(name="queue", folder=tmp_path)
 
     assert queue.pop == getattr(queue, expected_pop_method)
+
+
+@pytest.mark.parametrize("sqlite_version", ((2, 99, 99), (4, 0, 0)))
+def test_rejects_unsupported_sqlite_major_versions(
+    tmp_path: Path,
+    monkeypatch,
+    sqlite_version: tuple[int, int, int],
+) -> None:
+    """Construction rejects SQLite major versions outside the supported line."""
+    monkeypatch.setattr(litequeue.sqlite3, "sqlite_version_info", sqlite_version)
+    formatted_version = ".".join(str(part) for part in sqlite_version)
+
+    with pytest.raises(RuntimeError) as error_info:
+        LiteQueue(name="queue", folder=tmp_path)
+
+    expected_message = f"LiteQueue requires SQLite 3; found SQLite {formatted_version}"
+    assert str(error_info.value) == expected_message
+    assert not (tmp_path / "queue.queue.sqlite3").exists()
+
+
+def test_get_sqlite_version_returns_complete_version(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """SQLite feature checks retain the major, minor, and patch components."""
+    sqlite_version = (3, 35, 2)
+    monkeypatch.setattr(litequeue.sqlite3, "sqlite_version_info", sqlite_version)
+
+    queue = LiteQueue(name="queue", folder=tmp_path)
+
+    assert queue.get_sqlite_version() == sqlite_version
 
 
 def test_connection_kwargs_are_forwarded_to_all_connections(

@@ -25,7 +25,7 @@ Install the package with uv:
 uv add litequeue
 ```
 
-Python 3.12 or newer is required.
+Python 3.12 or newer and SQLite 3 are required.
 
 ## Quickstart
 
