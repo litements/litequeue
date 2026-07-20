@@ -26,8 +26,13 @@ clean: ## Clean artifacts
 
 
 .PHONY: test
-test: ## Run tests
-	uv run --group dev pytest
+test: ## Run tests without the Docker compatibility matrix
+	uv run --group dev pytest --ignore=tests/test_sqlite_versions.py
+
+
+.PHONY: test-docker
+test-docker: ## Run the Docker SQLite compatibility matrix
+	uv run --group dev pytest tests/test_sqlite_versions.py -vv -x
 
 .PHONY: typecheck
 typecheck: ## Run static type checks
