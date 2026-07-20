@@ -60,10 +60,10 @@ print(task)
 # )
 
 updated = q.done(task.message_id)
-assert updated is True
+assert updated
 
 # Update methods return False when the message ID does not exist.
-assert q.done("missing-message") is False
+assert not q.done("missing-message")
 
 q.get(task.message_id)
 
