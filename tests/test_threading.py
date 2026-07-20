@@ -18,7 +18,18 @@ def require_message(message: Message | None) -> Message:
     return message
 
 
-@pytest.fixture(params=("_pop_returning", "_pop_transaction"))
+@pytest.fixture(
+    params=(
+        pytest.param(
+            "_pop_returning",
+            marks=pytest.mark.skipif(
+                sqlite3.sqlite_version_info < (3, 35, 0),
+                reason="SQLite RETURNING requires SQLite 3.35 or newer",
+            ),
+        ),
+        "_pop_transaction",
+    )
+)
 def shared_queue(request, tmp_path: Path) -> LiteQueue:
     """Return a shared queue using one of the supported pop paths."""
     queue = LiteQueue(name=request.param, folder=tmp_path)

@@ -1,0 +1,6 @@
+*
+!pyproject.toml
+!uv.lock
+!tests/
+tests/*
+!tests/test.dockerfile

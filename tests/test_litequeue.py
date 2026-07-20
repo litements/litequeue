@@ -769,18 +769,24 @@ def test_duplicate_message_ids_are_rejected_by_sqlite(tmp_path: Path) -> None:
     "statement",
     (
         "SELECT * FROM [Queue] WHERE status = 0 ORDER BY message_id LIMIT 1",
-        """
-        UPDATE [Queue]
-        SET status = 1, lock_time = :now
-        WHERE rowid = (
-            SELECT rowid
-            FROM [Queue]
-            WHERE status = 0
-            ORDER BY message_id
-            LIMIT 1
-        )
-        RETURNING *
-        """,
+        pytest.param(
+            """
+            UPDATE [Queue]
+            SET status = 1, lock_time = :now
+            WHERE rowid = (
+                SELECT rowid
+                FROM [Queue]
+                WHERE status = 0
+                ORDER BY message_id
+                LIMIT 1
+            )
+            RETURNING *
+            """,
+            marks=pytest.mark.skipif(
+                sqlite3.sqlite_version_info < (3, 35, 0),
+                reason="SQLite RETURNING requires SQLite 3.35 or newer",
+            ),
+        ),
     ),
     ids=("peek", "pop"),
 )
