@@ -51,16 +51,6 @@ def cleanup_database(database_path: Path) -> None:
 
 
 def benchmark_puts(number: int, repeat: int) -> None:
-    memory_connection = sqlite3.connect(":memory:")
-    memory_queue = LiteQueue(conn=memory_connection, maxsize=None)
-    benchmark(
-        "LiteQueue put (memory)",
-        lambda: memory_queue.put(random_string(20)),
-        number,
-        repeat,
-    )
-    memory_queue.close()
-
     standard_queue = Queue()
     benchmark(
         "queue.Queue put",
@@ -93,8 +83,9 @@ def benchmark_completion(number: int, repeat: int) -> None:
 
     benchmark("queue.Queue complete task", complete_standard_task, number, repeat)
 
-    memory_connection = sqlite3.connect(":memory:")
-    lite_queue = LiteQueue(conn=memory_connection, maxsize=None)
+    database_path = Path("completion.queue.sqlite3")
+    cleanup_database(database_path)
+    lite_queue = LiteQueue(name="completion", maxsize=None)
 
     def complete_litequeue_task() -> None:
         task_id = random_string(20)
@@ -104,6 +95,7 @@ def benchmark_completion(number: int, repeat: int) -> None:
 
     benchmark("LiteQueue complete task", complete_litequeue_task, number, repeat)
     lite_queue.close()
+    cleanup_database(database_path)
 
 
 def benchmark_pop_method(label: str, method_name: str, item_count: int) -> None:

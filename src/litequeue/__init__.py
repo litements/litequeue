@@ -126,6 +126,13 @@ type PopFunction = Callable[[], Message | None]
 
 _QUEUE_TABLE_NAME = "Queue"
 _READ_CONNECTION_POOL_SIZE = 10
+_MANAGED_CONNECTION_OPTIONS = {
+    "autocommit",
+    "cached_statements",
+    "check_same_thread",
+    "database",
+    "isolation_level",
+}
 
 
 def validate_maxsize(maxsize: int | None) -> int | None:
@@ -145,26 +152,26 @@ def validate_maxsize(maxsize: int | None) -> int | None:
 class LiteQueue:
     def __init__(
         self,
-        name: str | None = None,
-        conn: sqlite3.Connection | None = None,
+        name: str,
         folder: Path | None = None,
         maxsize: int | None = None,
-        sqlite_cache_size_bytes: int = 256_000,
-        **kwargs,
+        **kwargs: object,
     ) -> None:
         """
         Create a new queue.
 
         Args:
         - name: Queue name. LiteQueue stores it in `<name>.queue.sqlite3`.
-        - conn: Existing SQLite connection to use instead of creating a database.
         - folder: Directory for a named queue. Defaults to the current directory.
         - maxsize: Maximum number of ready messages allowed in the queue. The
           value is stored as an immutable queue setting. When reopening a
           queue, omit it to use the stored setting or pass the same value.
           Conflicting values raise ValueError. Zero creates a queue that
           cannot accept messages (default: None, unlimited on first creation).
-        - sqlite_cache_size_bytes: Size for the SQLite cache_size in bytes (default: 256_000 [256MB])
+        - kwargs: Additional options forwarded to every `sqlite3.connect()`
+          call, including `timeout`, `detect_types`, `factory`, and `uri`.
+          LiteQueue manages `database`, `isolation_level`, `check_same_thread`,
+          `cached_statements`, and `autocommit`; passing one raises ValueError.
 
         Each database can contain only one LiteQueue queue, stored in the fixed
         "Queue" table. Other tables are not supported.
@@ -173,66 +180,48 @@ class LiteQueue:
         compiled in serialized mode, as in standard CPython builds. LiteQueue
         serializes writes and explicit transactions while a read-only pool
         serves committed data to other threads.
-        A connection supplied with ``conn`` must have been created with
-        ``check_same_thread=False`` and ``cached_statements=0`` to be used from
-        multiple threads. Caller-supplied connections cannot use the internal
-        read pool, so all of their operations are serialized.
 
         """
-        name_was_provided = name is not None
-        connection_was_provided = conn is not None
-        if name_was_provided == connection_was_provided:
-            raise ValueError("Exactly one of name or conn must be provided")
-
-        if name is not None and not isinstance(name, str):
+        if not isinstance(name, str):
             raise TypeError("name must be a string")
 
         if name == "":
             raise ValueError("name must not be empty")
 
-        if name is not None and Path(name).name != name:
+        if Path(name).name != name:
             raise ValueError("name must not contain a directory path; use folder")
-
-        if conn is not None and not isinstance(conn, sqlite3.Connection):
-            raise TypeError("conn must be a sqlite3.Connection")
 
         if folder is not None and not isinstance(folder, Path):
             raise TypeError("folder must be a pathlib.Path or None")
 
-        if conn is not None and folder is not None:
-            raise ValueError("folder cannot be used with conn")
-
-        if conn is not None and kwargs:
-            raise ValueError("SQLite connection options cannot be used with conn")
+        managed_options = _MANAGED_CONNECTION_OPTIONS.intersection(kwargs)
+        if managed_options:
+            option_list = ", ".join(sorted(managed_options))
+            raise ValueError(
+                f"LiteQueue manages SQLite connection options: {option_list}"
+            )
 
         validated_maxsize = validate_maxsize(maxsize)
 
-        assert sqlite_cache_size_bytes > 0
-        cache_n = -1 * sqlite_cache_size_bytes
-
-        self._connection_lock = threading.RLock()
+        self._write_connection_lock = threading.RLock()
         self._transaction_owner: int | None = None
         self._close_state_lock = threading.Lock()
         self._is_closed = False
 
-        if conn is not None:
-            self.conn = conn
-            self.conn.isolation_level = None
-        else:
-            queue_folder = folder if folder is not None else Path.cwd()
-            if not queue_folder.is_dir():
-                raise ValueError("folder must be an existing directory")
+        queue_folder = folder if folder is not None else Path.cwd()
+        if not queue_folder.is_dir():
+            raise ValueError("folder must be an existing directory")
 
-            database_filename = queue_folder / f"{name}.queue.sqlite3"
-            self.conn = sqlite3.connect(
-                str(database_filename),
-                isolation_level=None,
-                check_same_thread=False,
-                # Disable cached statements due to a bug in CPython >= 3.12.
-                # https://github.com/python/cpython/issues/118172
-                cached_statements=0,
-                **kwargs,
-            )
+        database_filename = queue_folder / f"{name}.queue.sqlite3"
+        self.conn = sqlite3.connect(
+            database=str(database_filename),
+            isolation_level=None,
+            check_same_thread=False,
+            # Disable cached statements due to a bug in CPython >= 3.12.
+            # https://github.com/python/cpython/issues/118172
+            cached_statements=0,
+            **kwargs,
+        )
 
         self.conn.row_factory = sqlite3.Row
 
@@ -318,41 +307,38 @@ END;"""
 
         self.maxsize = effective_maxsize
 
-        # if fast:
-        self.conn.execute("PRAGMA journal_mode = WAL;")
+        journal_mode_row = self.conn.execute("PRAGMA journal_mode;").fetchone()
+        current_journal_mode = journal_mode_row[0].lower()
+        if current_journal_mode != "wal":
+            # Changing journal mode takes a database lock. Avoid that lock when
+            # reopening the queue after WAL has already been configured.
+            self.conn.execute("PRAGMA journal_mode = WAL;")
         self.conn.execute("PRAGMA temp_store = MEMORY;")
         self.conn.execute("PRAGMA synchronous = NORMAL;")
-        self.conn.execute(f"PRAGMA cache_size = {cache_n};")
 
         # Separate read connections prevent reads in one thread from joining
         # another thread's write transaction and observing data that may still
         # be rolled back. A small fixed pool also allows unrelated reads to run
         # concurrently without creating an unbounded number of file handles.
-        #
-        # Caller-owned connections cannot be reopened reliably (an in-memory
-        # database has no path), so those queues retain the write connection and
-        # its lock for reads.
-        self._read_connections: Queue[sqlite3.Connection] | None = None
-        if conn is None:
-            read_connections: Queue[sqlite3.Connection] = Queue(
-                maxsize=_READ_CONNECTION_POOL_SIZE
+        read_connections: Queue[sqlite3.Connection] = Queue(
+            maxsize=_READ_CONNECTION_POOL_SIZE
+        )
+        for _ in range(_READ_CONNECTION_POOL_SIZE):
+            read_connection = sqlite3.connect(
+                database=str(database_filename),
+                isolation_level=None,
+                check_same_thread=False,
+                # Disable cached statements due to a bug in CPython >= 3.12.
+                # https://github.com/python/cpython/issues/118172
+                cached_statements=0,
+                **kwargs,
             )
-            for _ in range(_READ_CONNECTION_POOL_SIZE):
-                read_connection = sqlite3.connect(
-                    str(database_filename),
-                    isolation_level=None,
-                    check_same_thread=False,
-                    # Disable cached statements due to a bug in CPython >= 3.12.
-                    # https://github.com/python/cpython/issues/118172
-                    cached_statements=0,
-                    **kwargs,
-                )
-                read_connection.row_factory = sqlite3.Row
-                # This is a second line of defense against accidentally routing
-                # a mutation through the pool in a future code change.
-                read_connection.execute("PRAGMA query_only = ON;")
-                read_connections.put(read_connection)
-            self._read_connections = read_connections
+            read_connection.row_factory = sqlite3.Row
+            # This is a second line of defense against accidentally routing
+            # a mutation through the pool in a future code change.
+            read_connection.execute("PRAGMA query_only = ON;")
+            read_connections.put(read_connection)
+        self._read_connections = read_connections
 
     def _get_stored_maxsize(self) -> int | None:
         """Read the immutable capacity from the queue's trigger."""
@@ -404,7 +390,7 @@ END;"""
         message_id = str(uuid7())
         now = time_ns()
 
-        with self._connection_lock:
+        with self._write_connection_lock:
             self.conn.execute(
                 f"""
                 INSERT INTO
@@ -491,19 +477,11 @@ END;"""
             # The transaction owner must read through the write connection to
             # see its own uncommitted changes. RLock makes this reacquisition
             # safe while transaction() already holds the write lock.
-            with self._connection_lock:
+            with self._write_connection_lock:
                 yield self.conn
             return
 
         read_connections = self._read_connections
-        if read_connections is None:
-            # A caller-supplied connection may be in-memory and impossible to
-            # reopen. Serializing its reads is the only way to stop them from
-            # entering another thread's transaction on the same connection.
-            with self._connection_lock:
-                yield self.conn
-            return
-
         with self._close_state_lock:
             if self._is_closed:
                 raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
@@ -552,7 +530,7 @@ END;"""
 
         now = time_ns()
 
-        with self._connection_lock:
+        with self._write_connection_lock:
             cursor = self.conn.execute(
                 f"""
                 UPDATE {self.table} SET
@@ -572,7 +550,7 @@ END;"""
         Return `True` when the message exists, otherwise `False`.
         """
 
-        with self._connection_lock:
+        with self._write_connection_lock:
             cursor = self.conn.execute(
                 f"""
                 UPDATE {self.table} SET
@@ -631,7 +609,7 @@ END;"""
         Return `True` when the message exists, otherwise `False`.
         """
 
-        with self._connection_lock:
+        with self._write_connection_lock:
             cursor = self.conn.execute(
                 f"""
                 UPDATE {self.table} SET
@@ -697,7 +675,7 @@ END;"""
 
         If `include_failed` is True, the messages in `FAILED` state will be deleted too.
         """
-        with self._connection_lock:
+        with self._write_connection_lock:
             if include_failed:
                 self.conn.execute(
                     f"DELETE FROM {self.table} WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
@@ -714,7 +692,7 @@ END;"""
         IMPORTANT: The `VACUUM` step can take some time to finish depending on
         the size of the queue and how many messages have been deleted.
         """
-        with self._connection_lock:
+        with self._write_connection_lock:
             self.conn.execute("VACUUM;")
 
     # SQLite works better in autocommit mode when using short DML (INSERT /
@@ -724,7 +702,7 @@ END;"""
         """Run a transaction while excluding other threads from the connection."""
         if mode not in {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}:
             raise ValueError(f"Transaction mode '{mode}' is not valid")
-        with self._connection_lock:
+        with self._write_connection_lock:
             # We must issue a "BEGIN" explicitly when running in auto-commit mode.
             self.conn.execute(f"BEGIN {mode}")
             self._transaction_owner = threading.get_ident()
@@ -749,23 +727,21 @@ END;"""
         return f"{type(self).__name__}(Connection={connection_repr}, items={items})"
 
     def close(self) -> None:
-        with self._connection_lock:
+        with self._write_connection_lock:
             with self._close_state_lock:
                 if self._is_closed:
                     return
                 self._is_closed = True
 
             read_connections = self._read_connections
-            if read_connections is not None:
-                # Draining all ten slots waits for checked-out readers to finish.
-                # Once _is_closed is set, new readers return their slot and fail,
-                # so they cannot race shutdown or use a closed connection.
-                connections_to_close = [
-                    read_connections.get()
-                    for _ in range(_READ_CONNECTION_POOL_SIZE)
-                ]
-                for read_connection in connections_to_close:
-                    read_connection.close()
+            # Draining all ten slots waits for checked-out readers to finish.
+            # Once _is_closed is set, new readers fail before checkout, so they
+            # cannot race shutdown or use a closed connection.
+            connections_to_close = [
+                read_connections.get() for _ in range(_READ_CONNECTION_POOL_SIZE)
+            ]
+            for read_connection in connections_to_close:
+                read_connection.close()
 
             self.conn.close()
 

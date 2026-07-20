@@ -129,10 +129,8 @@ def test_mixed_uuid_formats_sort_by_message_id_after_reopen(
 
 
 @pytest.fixture(scope="function")
-def single_queue() -> LiteQueue:
-    connection = sqlite3.connect(":memory:")
-    _q = LiteQueue(conn=connection)
-    return _q
+def single_queue(tmp_path: Path) -> LiteQueue:
+    return LiteQueue(name="single", folder=tmp_path)
 
 
 @pytest.fixture(scope="function")
@@ -145,16 +143,6 @@ def queue_with_data(single_queue) -> LiteQueue:
     return q
 
 
-def test_existing_connection_is_used_in_autocommit_mode() -> None:
-    """A supplied connection is reused and switched to autocommit mode."""
-    connection = sqlite3.connect(":memory:")
-
-    queue = LiteQueue(conn=connection)
-
-    assert queue.conn is connection
-    assert queue.conn.isolation_level is None
-
-
 @pytest.mark.parametrize(
     ("sqlite_version", "expected_pop_method"),
     (
@@ -163,30 +151,96 @@ def test_existing_connection_is_used_in_autocommit_mode() -> None:
     ),
 )
 def test_selects_pop_method_for_sqlite_features(
+    tmp_path: Path,
     monkeypatch,
     sqlite_version: tuple[int, int, int],
     expected_pop_method: str,
 ) -> None:
     """Pop uses RETURNING when SQLite supports it and the fallback otherwise."""
     monkeypatch.setattr(litequeue.sqlite3, "sqlite_version_info", sqlite_version)
-    connection = sqlite3.connect(":memory:")
 
-    queue = LiteQueue(conn=connection)
+    queue = LiteQueue(name="queue", folder=tmp_path)
 
     assert queue.pop == getattr(queue, expected_pop_method)
 
 
+def test_connection_kwargs_are_forwarded_to_all_connections(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Supported SQLite options reach the write and read connections."""
+    connect = sqlite3.connect
+    received_options: list[dict[str, object]] = []
+
+    def recording_connect(*args, **kwargs):
+        received_options.append(kwargs)
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(litequeue.sqlite3, "connect", recording_connect)
+
+    queue = LiteQueue(name="queue", folder=tmp_path, timeout=12.5)
+    queue.close()
+
+    assert len(received_options) == 11
+    assert all(options["timeout"] == 12.5 for options in received_options)
+
+
+def test_new_database_enables_wal(tmp_path: Path) -> None:
+    """A queue switches a new database from DELETE journaling to WAL."""
+    queue = LiteQueue(name="queue", folder=tmp_path)
+
+    journal_mode = queue.conn.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert journal_mode.lower() == "wal"
+
+
+def test_queue_uses_sqlite_default_cache_size(tmp_path: Path) -> None:
+    """LiteQueue does not override SQLite's per-connection cache default."""
+    default_database = tmp_path / "default.sqlite3"
+    default_connection = sqlite3.connect(default_database)
+    expected_cache_size = default_connection.execute("PRAGMA cache_size").fetchone()[0]
+    default_connection.close()
+
+    queue = LiteQueue(name="queue", folder=tmp_path)
+    actual_cache_size = queue.conn.execute("PRAGMA cache_size").fetchone()[0]
+
+    assert actual_cache_size == expected_cache_size
+
+
+def test_existing_wal_database_skips_journal_mode_change(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Reopening WAL avoids the locking journal-mode assignment."""
+    LiteQueue(name="queue", folder=tmp_path).close()
+    connect = sqlite3.connect
+    statements: list[str] = []
+
+    def tracing_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(litequeue.sqlite3, "connect", tracing_connect)
+
+    LiteQueue(name="queue", folder=tmp_path).close()
+
+    normalized_statements = [statement.strip().lower() for statement in statements]
+    assert "pragma journal_mode;" in normalized_statements
+    assert "pragma journal_mode = wal;" not in normalized_statements
+
+
 @pytest.mark.parametrize(
-    "kwargs",
-    (
-        {},
-        {"name": "queue", "conn": sqlite3.connect(":memory:")},
-    ),
+    "managed_option",
+    ("autocommit", "cached_statements", "check_same_thread", "database", "isolation_level"),
 )
-def test_name_and_connection_are_mutually_exclusive(kwargs) -> None:
-    """Exactly one queue name or SQLite connection is required."""
-    with pytest.raises(ValueError, match="Exactly one of name or conn"):
-        LiteQueue(**kwargs)
+def test_managed_connection_kwargs_are_rejected(
+    tmp_path: Path,
+    managed_option: str,
+) -> None:
+    """Callers cannot override connection behavior required by LiteQueue."""
+    with pytest.raises(ValueError, match="LiteQueue manages SQLite connection options"):
+        LiteQueue(name="queue", folder=tmp_path, **{managed_option: None})
 
 
 def test_name_creates_queue_sqlite3_database(tmp_path: Path) -> None:
@@ -253,14 +307,6 @@ def test_queues_in_different_folders_are_created_and_reused(tmp_path: Path) -> N
         reopened_queue.close()
 
 
-def test_folder_cannot_be_used_with_connection(tmp_path: Path) -> None:
-    """A folder is meaningful only when LiteQueue creates the database."""
-    connection = sqlite3.connect(":memory:")
-
-    with pytest.raises(ValueError, match="folder cannot be used with conn"):
-        LiteQueue(conn=connection, folder=tmp_path)
-
-
 def test_name_cannot_include_a_directory(tmp_path: Path) -> None:
     """Queue location is controlled only through the folder argument."""
     name_with_path = str(tmp_path / "jobs")
@@ -269,10 +315,9 @@ def test_name_cannot_include_a_directory(tmp_path: Path) -> None:
         LiteQueue(name=name_with_path)
 
 
-def test_queue_creates_fixed_schema() -> None:
+def test_queue_creates_fixed_schema(tmp_path: Path) -> None:
     """A new database always receives the fixed Queue schema."""
-    connection = sqlite3.connect(":memory:")
-    q = LiteQueue(conn=connection, maxsize=1)
+    q = LiteQueue(name="queue", folder=tmp_path, maxsize=1)
 
     table = q.conn.execute(
         'SELECT "sql" FROM "sqlite_master" WHERE "type" = :type AND "name" = :name',
@@ -303,14 +348,19 @@ def test_queue_creates_fixed_schema() -> None:
     assert q.get(message.message_id) is not None
 
 
-def test_database_with_custom_queue_table_is_rejected_without_changes() -> None:
+def test_database_with_custom_queue_table_is_rejected_without_changes(
+    tmp_path: Path,
+) -> None:
     """A legacy custom queue table produces a clear, non-mutating error."""
-    connection = sqlite3.connect(":memory:")
+    database_path = tmp_path / "custom.queue.sqlite3"
+    connection = sqlite3.connect(database_path)
     connection.execute('CREATE TABLE "CustomQueue" ("value" TEXT NOT NULL)')
     connection.execute(
         'INSERT INTO "CustomQueue" ("value") VALUES (:value)',
         {"value": "preserved"},
     )
+    connection.commit()
+    connection.close()
 
     expected_message = (
         "LiteQueue no longer supports multiple queues or other tables in one "
@@ -318,8 +368,9 @@ def test_database_with_custom_queue_table_is_rejected_without_changes() -> None:
         "its own database."
     )
     with pytest.raises(ValueError, match=expected_message):
-        LiteQueue(conn=connection)
+        LiteQueue(name="custom", folder=tmp_path)
 
+    connection = sqlite3.connect(database_path)
     table_names = connection.execute(
         "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
     ).fetchall()
@@ -339,13 +390,15 @@ def test_database_with_queue_and_another_table_is_rejected(tmp_path: Path) -> No
     connection = sqlite3.connect(database_path)
     connection.execute('CREATE TABLE "ApplicationData" ("value" TEXT NOT NULL)')
     connection.commit()
+    connection.close()
 
     with pytest.raises(
         ValueError,
         match="Found unsupported table: ApplicationData",
     ):
-        LiteQueue(conn=connection)
+        LiteQueue(name="shared", folder=tmp_path)
 
+    connection = sqlite3.connect(database_path)
     queue_row = connection.execute(
         'SELECT "data" FROM "Queue" WHERE "message_id" = :message_id',
         {"message_id": message.message_id},
@@ -353,18 +406,22 @@ def test_database_with_queue_and_another_table_is_rejected(tmp_path: Path) -> No
     assert tuple(queue_row) == ("preserved queue message",)
 
 
-def test_database_error_lists_multiple_unsupported_tables() -> None:
+def test_database_error_lists_multiple_unsupported_tables(tmp_path: Path) -> None:
     """The error identifies every table that prevents single-queue use."""
-    connection = sqlite3.connect(":memory:")
+    database_path = tmp_path / "multiple.queue.sqlite3"
+    connection = sqlite3.connect(database_path)
     connection.execute('CREATE TABLE "Incoming" ("value" TEXT)')
     connection.execute('CREATE TABLE "Outgoing" ("value" TEXT)')
+    connection.commit()
+    connection.close()
 
     with pytest.raises(
         ValueError,
         match="Found unsupported tables: Incoming, Outgoing",
     ):
-        LiteQueue(conn=connection)
+        LiteQueue(name="multiple", folder=tmp_path)
 
+    connection = sqlite3.connect(database_path)
     table_names = connection.execute(
         "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
     ).fetchall()
@@ -451,9 +508,8 @@ def test_prune(queue_with_data):
     )
 
 
-def test_max_size():
-    connection = sqlite3.connect(":memory:")
-    q = LiteQueue(conn=connection, maxsize=50)
+def test_max_size(tmp_path: Path):
+    q = LiteQueue(name="queue", folder=tmp_path, maxsize=50)
     for i in range(50):
         q.put(f"data_{i}")
     assert q.qsize() == 50
@@ -578,12 +634,11 @@ def test_invalid_maxsize_type_is_rejected_before_schema_changes(tmp_path, maxsiz
     assert not database_path.exists()
 
 
-def test_empty(queue_with_data):
+def test_empty(queue_with_data, tmp_path: Path):
     q = queue_with_data
     assert q.empty() is False
 
-    connection = sqlite3.connect(":memory:")
-    q2 = LiteQueue(conn=connection)
+    q2 = LiteQueue(name="empty", folder=tmp_path)
     assert q2.empty() is True
 
 
@@ -674,10 +729,9 @@ def get_queue_indexes(
     return indexes
 
 
-def test_queue_gets_fixed_indexes() -> None:
+def test_queue_gets_fixed_indexes(tmp_path: Path) -> None:
     """The single Queue table receives the fixed unique and FIFO indexes."""
-    connection = sqlite3.connect(":memory:")
-    queue = LiteQueue(conn=connection)
+    queue = LiteQueue(name="queue", folder=tmp_path)
 
     assert get_queue_indexes(queue, "Queue") == {
         "Queue_message_id_unique_idx": (True, ["message_id"]),
@@ -685,10 +739,9 @@ def test_queue_gets_fixed_indexes() -> None:
     }
 
 
-def test_duplicate_message_ids_are_rejected_by_sqlite() -> None:
+def test_duplicate_message_ids_are_rejected_by_sqlite(tmp_path: Path) -> None:
     """The database, rather than application code, enforces message ID uniqueness."""
-    connection = sqlite3.connect(":memory:")
-    queue = LiteQueue(conn=connection)
+    queue = LiteQueue(name="queue", folder=tmp_path)
     message = queue.put("original")
 
     with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
@@ -727,10 +780,12 @@ def test_duplicate_message_ids_are_rejected_by_sqlite() -> None:
     ),
     ids=("peek", "pop"),
 )
-def test_fifo_queries_use_composite_index_without_temporary_sort(statement: str) -> None:
+def test_fifo_queries_use_composite_index_without_temporary_sort(
+    tmp_path: Path,
+    statement: str,
+) -> None:
     """FIFO peek and pop use the composite status/message ID index."""
-    connection = sqlite3.connect(":memory:")
-    queue = LiteQueue(conn=connection)
+    queue = LiteQueue(name="queue", folder=tmp_path)
     plan_rows = queue.conn.execute(
         f"EXPLAIN QUERY PLAN {statement}",
         {"now": time.time_ns()},

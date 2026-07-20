@@ -82,33 +82,6 @@ def test_read_connection_is_returned_to_pool(tmp_path: Path) -> None:
         assert result.result(timeout=5) == 0
 
 
-def test_default_supplied_connection_rejects_cross_thread_use() -> None:
-    """A caller-owned connection keeps its original same-thread contract."""
-    connection = sqlite3.connect(":memory:")
-    queue = LiteQueue(conn=connection)
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        result = executor.submit(queue.qsize)
-        with pytest.raises(sqlite3.ProgrammingError, match="same thread"):
-            result.result()
-
-
-def test_supplied_shared_connection_supports_threads() -> None:
-    """A correctly configured caller-owned connection can be shared."""
-    connection = sqlite3.connect(
-        ":memory:",
-        check_same_thread=False,
-        cached_statements=0,
-    )
-    queue = LiteQueue(conn=connection)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        messages = list(executor.map(queue.put, map(str, range(32))))
-
-    assert len({message.message_id for message in messages}) == 32
-    assert queue.qsize() == 32
-
-
 def test_shared_queue_enforces_maxsize_under_contention(tmp_path: Path) -> None:
     """Concurrent producers on one instance cannot exceed its capacity."""
     queue = LiteQueue(name="queue", folder=tmp_path, maxsize=8)

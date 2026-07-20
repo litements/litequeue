@@ -34,12 +34,9 @@ Python 3.12 or newer is required.
 ## Quickstart
 
 ```python
-import sqlite3
-
 from litequeue import LiteQueue
 
-connection = sqlite3.connect(":memory:")
-q = LiteQueue(conn=connection)
+q = LiteQueue(name="tasks")
 
 q.put("hello")
 q.put("world")
@@ -105,28 +102,26 @@ during a write transaction and see only committed data. A reentrant write lock
 prevents concurrent consumers from claiming the same message or entering
 another thread's transaction.
 
-When supplying `conn`, create it with `check_same_thread=False` before sharing
-the queue between threads:
-
-```python
-connection = sqlite3.connect(
-    ":memory:",
-    check_same_thread=False,
-    cached_statements=0,
-)
-queue = LiteQueue(conn=connection)
-```
-
-LiteQueue cannot change these settings or reliably reopen an existing
-connection. A queue created with `conn` therefore uses that connection for both
-reads and writes and serializes all access to it. Named queues get the separate
-read connection and allow reads to proceed during writes.
-
 An explicit `queue.transaction()` excludes other writers until it commits or
 rolls back. Reads in the transaction-owning thread use the write connection so
 they can see their own uncommitted changes; pooled readers in other threads
 continue and see the last committed state. `queue.close()` drains the read pool
 and waits for active reads and writes to finish.
+
+## SQLite connection options
+
+Additional keyword arguments are forwarded to `sqlite3.connect()` for the
+write connection and all ten read connections. Common options include
+`timeout`, `detect_types`, `factory`, and `uri`:
+
+```python
+queue = LiteQueue(name="tasks", timeout=30.0)
+```
+
+LiteQueue owns `database`, `isolation_level`, `check_same_thread`,
+`cached_statements`, and `autocommit` because its persistence, transaction, and
+threading guarantees depend on those settings. Passing one of these options
+raises `ValueError`.
 
 ## Examples and benchmarks
 
