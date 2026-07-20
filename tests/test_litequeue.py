@@ -8,6 +8,7 @@ import pytest
 
 import litequeue
 from litequeue import LiteQueue
+from litequeue import Message
 from litequeue import MessageStatus
 
 print(sqlite3.sqlite_version)
@@ -724,3 +725,44 @@ def test_fifo_queries_use_composite_index_without_temporary_sort(statement: str)
 
     assert "Queue_status_message_id_idx" in plan
     assert "USE TEMP B-TREE" not in plan
+
+
+def test_all_message_read_paths_return_typed_status(single_queue) -> None:
+    q = single_queue
+
+    q.put("locked")
+    failed_message = q.put("failed")
+    ready_message = q.put("ready")
+    locked_message = q.pop()
+    message_to_fail = q.pop()
+    q.mark_failed(message_to_fail.message_id)
+
+    messages = [
+        ready_message,
+        q.peek(),
+        q.get(ready_message.message_id),
+        locked_message,
+        *q.list_locked(threshold_seconds=0),
+        *q.list_failed(),
+    ]
+
+    assert failed_message.message_id == message_to_fail.message_id
+    assert all(isinstance(message, Message) for message in messages)
+    assert all(isinstance(message.status, MessageStatus) for message in messages)
+    assert {message.status for message in messages} == {
+        MessageStatus.READY,
+        MessageStatus.LOCKED,
+        MessageStatus.FAILED,
+    }
+
+
+def test_unknown_stored_status_raises_useful_error(single_queue) -> None:
+    q = single_queue
+    message = q.put("invalid status")
+    q.conn.execute(
+        f"UPDATE {q.table} SET status = :status WHERE message_id = :message_id",
+        {"status": 99, "message_id": message.message_id},
+    )
+
+    with pytest.raises(ValueError, match="Unknown message status: 99"):
+        q.get(message.message_id)

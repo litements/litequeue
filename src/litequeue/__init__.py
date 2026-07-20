@@ -7,6 +7,7 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 from uuid import UUID
@@ -98,6 +99,25 @@ class Message:
     in_time: int
     lock_time: int | None
     done_time: int | None
+
+
+def _message_from_row(row: sqlite3.Row) -> Message:
+    """Convert a SQLite row into a typed message."""
+
+    stored_status = row["status"]
+    try:
+        status = MessageStatus(stored_status)
+    except ValueError as error:
+        raise ValueError(f"Unknown message status: {stored_status!r}") from error
+
+    return Message(
+        data=row["data"],
+        message_id=row["message_id"],
+        status=status,
+        in_time=row["in_time"],
+        lock_time=row["lock_time"],
+        done_time=row["done_time"],
+    )
 
 
 type PopFunction = Callable[[], Message | None]
@@ -381,7 +401,7 @@ END;"""
             if not message:
                 return None
 
-            return Message(**message)
+            return _message_from_row(message)
 
     def _pop_transaction(self) -> Message | None:
         """
@@ -432,15 +452,13 @@ END;"""
                 },
             )
 
-            # We have updated the status in the databases, we will manually set
-            # it in the returned object before returning it to the user
-            return Message(
-                data=message["data"],
-                message_id=message["message_id"],
+            # We have updated the status in the database, so update the typed
+            # message before returning it to the user.
+            selected_message = _message_from_row(message)
+            return replace(
+                selected_message,
                 status=MessageStatus.LOCKED,
-                in_time=message["in_time"],
                 lock_time=lock_time,
-                done_time=message["done_time"],
             )
 
     def peek(self) -> Message | None:
@@ -450,7 +468,7 @@ END;"""
             f"SELECT * FROM {self.table} WHERE status = {MessageStatus.READY.value} ORDER BY message_id LIMIT 1",
         ).fetchone()
 
-        return Message(**value) if value is not None else None
+        return _message_from_row(value) if value is not None else None
 
     def get(self, message_id: str) -> Message | None:
         "Get a message by its `message_id`"
@@ -460,7 +478,7 @@ END;"""
             {"message_id": message_id},
         ).fetchone()
 
-        return Message(**value) if value is not None else None
+        return _message_from_row(value) if value is not None else None
 
     def done(self, message_id: str) -> bool:
         """
@@ -523,7 +541,7 @@ END;"""
         )
 
         for result in cursor:
-            yield Message(**result)
+            yield _message_from_row(result)
 
     def list_failed(self) -> Iterator[Message]:
         """
@@ -539,7 +557,7 @@ END;"""
         )
 
         for result in cursor:
-            yield Message(**result)
+            yield _message_from_row(result)
 
     def retry(self, message_id: str) -> bool:
         """
@@ -646,7 +664,7 @@ END;"""
 
     def __repr__(self) -> str:
         display_items = [
-            Message(**x)
+            _message_from_row(x)
             for x in self.conn.execute(f"SELECT * FROM {self.table} LIMIT 3").fetchall()
         ]
         return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat(display_items)})"
