@@ -12,6 +12,7 @@ from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 from queue import Queue
+from typing import Any
 from uuid import UUID
 
 # Expose function used by uuid7() to get current time in nanoseconds
@@ -155,7 +156,7 @@ class LiteQueue:
         name: str,
         folder: Path | None = None,
         maxsize: int | None = None,
-        **kwargs: object,
+        **kwargs: Any,
     ) -> None:
         """
         Create a new queue.

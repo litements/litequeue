@@ -8,7 +8,14 @@ import pytest
 
 import litequeue
 from litequeue import LiteQueue
+from litequeue import Message
 from litequeue import MessageStatus
+
+
+def require_message(message: Message | None) -> Message:
+    """Return a message after asserting that a queue operation succeeded."""
+    assert message is not None
+    return message
 
 
 @pytest.fixture(params=("_pop_returning", "_pop_transaction"))
@@ -112,7 +119,8 @@ def test_shared_queue_supports_concurrent_lifecycle_operations(
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         inserted = list(executor.map(queue.put, map(str, range(message_count))))
-        popped = list(executor.map(lambda _: queue.pop(), range(message_count)))
+        pop_results = executor.map(lambda _: queue.pop(), range(message_count))
+        popped = [require_message(message) for message in pop_results]
         completed = list(
             executor.map(queue.done, [message.message_id for message in popped])
         )
@@ -134,7 +142,8 @@ def test_concurrent_consumers_do_not_duplicate_claims(
         queue.put(str(index))
 
     with ThreadPoolExecutor(max_workers=32) as executor:
-        popped = list(executor.map(lambda _: queue.pop(), range(message_count)))
+        pop_results = executor.map(lambda _: queue.pop(), range(message_count))
+        popped = [require_message(message) for message in pop_results]
         empty_results = list(executor.map(lambda _: queue.pop(), range(32)))
 
     message_ids = [message.message_id for message in popped]
@@ -219,7 +228,7 @@ def test_concurrent_failure_and_retry_transitions(tmp_path: Path) -> None:
     queue = LiteQueue(name="queue", folder=tmp_path)
     for index in range(64):
         queue.put(str(index))
-    messages = [queue.pop() for _ in range(64)]
+    messages = [require_message(queue.pop()) for _ in range(64)]
     message_ids = [message.message_id for message in messages]
 
     with ThreadPoolExecutor(max_workers=16) as executor:
@@ -229,7 +238,10 @@ def test_concurrent_failure_and_retry_transitions(tmp_path: Path) -> None:
     assert failed == [True] * 64
     assert retried == [True] * 64
     assert queue.qsize() == 64
-    statuses = [queue.get(message_id).status for message_id in message_ids]
+    stored_messages = [
+        require_message(queue.get(message_id)) for message_id in message_ids
+    ]
+    statuses = [message.status for message in stored_messages]
     assert all(status is MessageStatus.READY for status in statuses)
 
 

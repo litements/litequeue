@@ -120,10 +120,14 @@ def test_mixed_uuid_formats_sort_by_message_id_after_reopen(
 
     reopened_queue = LiteQueue(name="queue", folder=tmp_path)
     new_message = reopened_queue.put("rfc-format")
+    peeked_message = reopened_queue.peek()
+    popped_message = reopened_queue.pop()
 
     assert new_message.message_id < old_message_id
-    assert reopened_queue.peek().message_id == new_message.message_id
-    assert reopened_queue.pop().message_id == new_message.message_id
+    assert peeked_message is not None
+    assert peeked_message.message_id == new_message.message_id
+    assert popped_message is not None
+    assert popped_message.message_id == new_message.message_id
 
     reopened_queue.close()
 

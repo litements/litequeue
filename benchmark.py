@@ -38,7 +38,7 @@ def display_timings(label: str, timings: list[float], number: int) -> None:
     print(f"{label}: {mean * 1_000_000:.2f} µs ± {deviation * 1_000_000:.2f} µs per loop")
 
 
-def benchmark(label: str, operation: Callable[[], None], number: int, repeat: int) -> None:
+def benchmark(label: str, operation: Callable[[], object], number: int, repeat: int) -> None:
     gc.collect()
     timings = timeit.repeat(operation, number=number, repeat=repeat)
     display_timings(label, timings, number)
@@ -52,7 +52,7 @@ def cleanup_database(database_path: Path) -> None:
 
 
 def benchmark_puts(number: int, repeat: int) -> None:
-    standard_queue = Queue()
+    standard_queue: Queue[str] = Queue()
     benchmark(
         "queue.Queue put",
         lambda: standard_queue.put(random_string(20)),
@@ -74,7 +74,7 @@ def benchmark_puts(number: int, repeat: int) -> None:
 
 
 def benchmark_completion(number: int, repeat: int) -> None:
-    standard_queue = Queue()
+    standard_queue: Queue[str] = Queue()
 
     def complete_standard_task() -> None:
         task_id = random_string(20)
@@ -92,6 +92,7 @@ def benchmark_completion(number: int, repeat: int) -> None:
         task_id = random_string(20)
         lite_queue.put(task_id)
         task = lite_queue.pop()
+        assert task is not None
         lite_queue.done(task.message_id)
 
     benchmark("LiteQueue complete task", complete_litequeue_task, number, repeat)
