@@ -74,6 +74,14 @@ Check out [the docs page](https://litements.polyrand.net/queue/) for more.
 - Timing metrics. As long as tasks are still in the queue or not pruned, you can see how long they have been there or how long they took to finish.
 - Easy to extend using SQL
 
+## Queue capacity
+
+`maxsize` limits the number of ready messages and is stored as an immutable
+property of the queue. Omit `maxsize` when reopening a queue to use its stored
+limit, or pass the same value. Passing a conflicting value raises `ValueError`.
+For a new queue, `None` means unlimited and `0` creates a queue that cannot
+accept messages.
+
 ## Examples and benchmarks
 
 You can have a look at the `tests/` folder. The tests are short and showcase

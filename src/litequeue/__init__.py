@@ -1,6 +1,7 @@
 import os
 import pathlib
 import pprint
+import re
 import sqlite3
 import time
 from collections.abc import Callable
@@ -139,6 +140,20 @@ def validate_table_name(name: str) -> str:
     return name
 
 
+def validate_maxsize(maxsize: int | None) -> int | None:
+    """Validate and return a queue capacity."""
+
+    maxsize_is_integer = isinstance(maxsize, int)
+    maxsize_is_boolean = isinstance(maxsize, bool)
+    if maxsize is not None and (not maxsize_is_integer or maxsize_is_boolean):
+        raise TypeError("maxsize must be an integer or None")
+
+    if maxsize is not None and maxsize < 0:
+        raise ValueError("maxsize must be zero or a positive integer")
+
+    return maxsize
+
+
 class LiteQueue:
     def __init__(
         self,
@@ -155,7 +170,11 @@ class LiteQueue:
         Args:
         - filename_or_conn: str, pathlib.Path, sqlite3.Connection
         - memory: Whether to use an in-memory database or not (default: False)
-        - maxsize: Maximum number of messages allowed in the queue (default: None)
+        - maxsize: Maximum number of ready messages allowed in the queue. The
+          value is stored as an immutable queue setting. When reopening a
+          queue, omit it to use the stored setting or pass the same value.
+          Conflicting values raise ValueError. Zero creates a queue that
+          cannot accept messages (default: None, unlimited on first creation).
         - queue_name: Name of the table that will store the messages (default: "Queue")
         - sqlite_cache_size_bytes: Size for the SQLite cache_size in bytes (default: 256_000 [256MB])
 
@@ -166,6 +185,8 @@ class LiteQueue:
         different files for each queue.
 
         """
+        validated_maxsize = validate_maxsize(maxsize)
+
         assert (filename_or_conn is not None and not memory) or (
             filename_or_conn is None and memory
         ), "Either specify a filename_or_conn or pass memory=True"
@@ -189,7 +210,6 @@ class LiteQueue:
             self.conn = filename_or_conn
             self.conn.isolation_level = None
 
-        self.maxsize = int(maxsize) if maxsize is not None else maxsize
         self.conn.row_factory = sqlite3.Row
 
         self.pop: PopFunction = self._select_pop_func()
@@ -197,7 +217,16 @@ class LiteQueue:
         validated_name = validate_table_name(queue_name)
         self.table = f"[{validated_name}]"
 
-        with self.transaction():
+        with self.transaction(mode="IMMEDIATE"):
+            table_exists = self.conn.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table' AND name = :table_name COLLATE NOCASE
+                """,
+                {"table_name": validated_name},
+            ).fetchone()
+
             # int == bool in SQLite
             # will have rowid as primary key by default
             self.conn.execute(
@@ -220,23 +249,65 @@ class LiteQueue:
                 f"CREATE INDEX IF NOT EXISTS SIdx ON {self.table}(status)"
             )
 
+            stored_maxsize = self._get_stored_maxsize(validated_name)
+            if table_exists is not None:
+                maxsize_conflicts = validated_maxsize is not None and (
+                    validated_maxsize != stored_maxsize
+                )
+                if maxsize_conflicts:
+                    raise ValueError(
+                        f"maxsize {validated_maxsize} conflicts with stored maxsize "
+                        f"{stored_maxsize} for queue '{validated_name}'"
+                    )
+
+                effective_maxsize = stored_maxsize
+            else:
+                effective_maxsize = validated_maxsize
+
+            if effective_maxsize is not None:
+                self.conn.execute(
+                    f"""
+CREATE TRIGGER IF NOT EXISTS maxsize_control_{validated_name}
+   BEFORE INSERT
+   ON {self.table}
+   WHEN (SELECT COUNT(*) FROM {self.table} WHERE status = {MessageStatus.READY.value}) >= {effective_maxsize}
+BEGIN
+    SELECT RAISE (ABORT,'Max queue length reached: {effective_maxsize}');
+END;"""
+                )
+
+        self.maxsize = effective_maxsize
+
         # if fast:
         self.conn.execute("PRAGMA journal_mode = WAL;")
         self.conn.execute("PRAGMA temp_store = MEMORY;")
         self.conn.execute("PRAGMA synchronous = NORMAL;")
         self.conn.execute(f"PRAGMA cache_size = {cache_n};")
 
-        if self.maxsize is not None:
-            self.conn.execute(
-                f"""
-CREATE TRIGGER IF NOT EXISTS maxsize_control_{validated_name}
-   BEFORE INSERT
-   ON {self.table}
-   WHEN (SELECT COUNT(*) FROM {self.table} WHERE status = {MessageStatus.READY.value}) >= {self.maxsize}
-BEGIN
-    SELECT RAISE (ABORT,'Max queue length reached: {self.maxsize}');
-END;"""
+    def _get_stored_maxsize(self, queue_name: str) -> int | None:
+        """Read the immutable capacity from the queue's trigger."""
+
+        trigger_name = f"maxsize_control_{queue_name}"
+        trigger = self.conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'trigger' AND name = :trigger_name COLLATE NOCASE
+            """,
+            {"trigger_name": trigger_name},
+        ).fetchone()
+        if trigger is None:
+            return None
+
+        trigger_sql = trigger["sql"]
+        match = re.search(r"Max queue length reached: (-?\d+)", trigger_sql)
+        if match is None:
+            raise ValueError(
+                f"Stored maxsize trigger for queue '{queue_name}' is invalid"
             )
+
+        stored_maxsize = int(match.group(1))
+        return validate_maxsize(stored_maxsize)
 
     def get_sqlite_version(self) -> int:
         sqlite_ver = sqlite3.sqlite_version_info
