@@ -13,21 +13,10 @@ print(sqlite3.sqlite_version)
 # https://docs.pytest.org/en/7.1.x/how-to/fixtures.html#parametrizing-fixtures
 
 
-@pytest.fixture(
-    scope="function",
-    params=[None, "CustomQueue"],
-    ids=["table_name=<Default>", "table_name=CustomQueue"],
-)
-def queue_name(request) -> str:
-    return request.param
-
-
 @pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])
-def single_queue(request, queue_name) -> LiteQueue:
-    kwargs = {"filename_or_conn": ":memory:"}
-    if queue_name is not None:
-        kwargs["queue_name"] = queue_name
-    _q = LiteQueue(**kwargs)
+def single_queue(request) -> LiteQueue:
+    connection = sqlite3.connect(":memory:")
+    _q = LiteQueue(conn=connection)
 
     if _q.get_sqlite_version() > 35:
         _q.pop = getattr(_q, request.param)
@@ -45,65 +34,117 @@ def queue_with_data(single_queue) -> LiteQueue:
     return q
 
 
+def test_existing_connection_is_used_in_autocommit_mode() -> None:
+    """A supplied connection is reused and switched to autocommit mode."""
+    connection = sqlite3.connect(":memory:")
+
+    queue = LiteQueue(conn=connection)
+
+    assert queue.conn is connection
+    assert queue.conn.isolation_level is None
+
+
 @pytest.mark.parametrize(
     "kwargs",
     (
-        {"filename_or_conn": sqlite3.connect(":memory:")},
-        {"filename_or_conn": ":memory:"},
-        {"memory": True},
+        {},
+        {"name": "queue", "conn": sqlite3.connect(":memory:")},
     ),
 )
-def test_isolation_level(kwargs):
-    q = LiteQueue(**kwargs)
-    assert q.conn.isolation_level is None, (
-        f"Isolation level not set properly for connection '{kwargs}'"
+def test_name_and_connection_are_mutually_exclusive(kwargs) -> None:
+    """Exactly one queue name or SQLite connection is required."""
+    with pytest.raises(ValueError, match="Exactly one of name or conn"):
+        LiteQueue(**kwargs)
+
+
+def test_name_creates_queue_sqlite3_database(tmp_path: Path) -> None:
+    """The queue name maps directly to a .queue.sqlite3 database filename."""
+    database_path = tmp_path / "email.queue.sqlite3"
+
+    queue = LiteQueue(name="email", folder=tmp_path)
+    queue.close()
+
+    assert database_path.is_file()
+
+
+def test_name_uses_current_directory_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Named queues default to the current working directory."""
+    monkeypatch.chdir(tmp_path)
+
+    queue = LiteQueue(name="jobs")
+    queue.close()
+
+    assert (tmp_path / "jobs.queue.sqlite3").is_file()
+
+
+def test_queues_in_different_folders_are_created_and_reused(tmp_path: Path) -> None:
+    """A name and folder pair identifies one persistent queue database."""
+    incoming_folder = tmp_path / "incoming"
+    outgoing_folder = tmp_path / "outgoing"
+    incoming_folder.mkdir()
+    outgoing_folder.mkdir()
+
+    incoming_queue = LiteQueue(name="incoming", folder=incoming_folder)
+    outgoing_queue = LiteQueue(name="outgoing", folder=outgoing_folder)
+    incoming_message = incoming_queue.put("receive order")
+    outgoing_message = outgoing_queue.put("send receipt")
+    incoming_queue.close()
+    outgoing_queue.close()
+
+    queue_locations = (
+        ("incoming", incoming_folder, incoming_message.message_id),
+        ("outgoing", outgoing_folder, outgoing_message.message_id),
     )
+    for queue_name, queue_folder, message_id in queue_locations:
+        database_path = queue_folder / f"{queue_name}.queue.sqlite3"
+        assert database_path.is_file()
+
+        reopened_queue = LiteQueue(name=queue_name, folder=queue_folder)
+        table_rows = reopened_queue.conn.execute(
+            """
+            SELECT name
+            FROM sqlite_schema
+            WHERE type = 'table' AND name NOT GLOB 'sqlite_*'
+            """
+        ).fetchall()
+
+        assert [row["name"] for row in table_rows] == ["Queue"]
+        assert get_queue_indexes(reopened_queue, "Queue") == {
+            "Queue_message_id_unique_idx": (True, ["message_id"]),
+            "Queue_status_message_id_idx": (False, ["status", "message_id"]),
+        }
+        assert reopened_queue.get(message_id) is not None
+        assert reopened_queue.qsize() == 1
+        reopened_queue.close()
 
 
-@pytest.mark.parametrize(
-    "queue_name",
-    (
-        "",
-        "queue name",
-        "queue;name",
-        "queue--name",
-        "queue/*name*/",
-        "1queue",
-        "café",
-        "evil BEFORE INSERT ON victim BEGIN DELETE FROM victim; END; /*",
-    ),
-)
-def test_invalid_queue_name_is_rejected_before_schema_changes(queue_name: str) -> None:
-    conn = sqlite3.connect(":memory:")
-    conn.execute('CREATE TABLE "victim" ("value" TEXT NOT NULL)')
-    conn.execute(
-        'INSERT INTO "victim" ("value") VALUES (:value)',
-        {"value": "safe"},
-    )
+def test_folder_cannot_be_used_with_connection(tmp_path: Path) -> None:
+    """A folder is meaningful only when LiteQueue creates the database."""
+    connection = sqlite3.connect(":memory:")
 
-    with pytest.raises(ValueError, match="Invalid table name"):
-        LiteQueue(filename_or_conn=conn, maxsize=1, queue_name=queue_name)
-
-    schema_objects = conn.execute(
-        'SELECT "name" FROM "sqlite_master" WHERE "name" != :name',
-        {"name": "victim"},
-    ).fetchall()
-    victim_rows = conn.execute('SELECT "value" FROM "victim"').fetchall()
-
-    assert schema_objects == []
-    assert victim_rows == [("safe",)]
+    with pytest.raises(ValueError, match="folder cannot be used with conn"):
+        LiteQueue(conn=connection, folder=tmp_path)
 
 
-@pytest.mark.parametrize(
-    "queue_name", ("Queue", "custom_queue_2", "_private", "select")
-)
-def test_valid_queue_names_create_safely_quoted_schema(queue_name: str) -> None:
-    q = LiteQueue(filename_or_conn=":memory:", maxsize=1, queue_name=queue_name)
-    trigger_name = f"maxsize_control_{queue_name}"
+def test_name_cannot_include_a_directory(tmp_path: Path) -> None:
+    """Queue location is controlled only through the folder argument."""
+    name_with_path = str(tmp_path / "jobs")
+
+    with pytest.raises(ValueError, match="name must not contain a directory path"):
+        LiteQueue(name=name_with_path)
+
+
+def test_queue_creates_fixed_schema() -> None:
+    """A new database always receives the fixed Queue schema."""
+    connection = sqlite3.connect(":memory:")
+    q = LiteQueue(conn=connection, maxsize=1)
 
     table = q.conn.execute(
         'SELECT "sql" FROM "sqlite_master" WHERE "type" = :type AND "name" = :name',
-        {"type": "table", "name": queue_name},
+        {"type": "table", "name": "Queue"},
     ).fetchone()
     indexes = q.conn.execute(
         'SELECT "sql" FROM "sqlite_master" WHERE "type" = :type ORDER BY "name"',
@@ -111,25 +152,91 @@ def test_valid_queue_names_create_safely_quoted_schema(queue_name: str) -> None:
     ).fetchall()
     trigger = q.conn.execute(
         'SELECT "sql" FROM "sqlite_master" WHERE "type" = :type AND "name" = :name',
-        {"type": "trigger", "name": trigger_name},
+        {"type": "trigger", "name": "maxsize_control_Queue"},
     ).fetchone()
 
     index_sql = [index[0] for index in indexes]
 
     assert table is not None
-    assert f'CREATE TABLE "{queue_name}"' in table[0]
+    assert 'CREATE TABLE "Queue"' in table[0]
     assert index_sql == [
-        f'CREATE UNIQUE INDEX "{queue_name}_message_id_unique_idx" '
-        f'ON "{queue_name}"(message_id)',
-        f'CREATE INDEX "{queue_name}_status_message_id_idx" '
-        f'ON "{queue_name}"(status, message_id)',
+        'CREATE UNIQUE INDEX "Queue_message_id_unique_idx" ON "Queue"(message_id)',
+        'CREATE INDEX "Queue_status_message_id_idx" ON "Queue"(status, message_id)',
     ]
     assert trigger is not None
-    assert f'CREATE TRIGGER "{trigger_name}"' in trigger[0]
-    assert f'ON "{queue_name}"' in trigger[0]
+    assert 'CREATE TRIGGER "maxsize_control_Queue"' in trigger[0]
+    assert 'ON "Queue"' in trigger[0]
 
     message = q.put("hello")
     assert q.get(message.message_id) is not None
+
+
+def test_database_with_custom_queue_table_is_rejected_without_changes() -> None:
+    """A legacy custom queue table produces a clear, non-mutating error."""
+    connection = sqlite3.connect(":memory:")
+    connection.execute('CREATE TABLE "CustomQueue" ("value" TEXT NOT NULL)')
+    connection.execute(
+        'INSERT INTO "CustomQueue" ("value") VALUES (:value)',
+        {"value": "preserved"},
+    )
+
+    expected_message = (
+        "LiteQueue no longer supports multiple queues or other tables in one "
+        "database. Found unsupported table: CustomQueue. Each queue must use "
+        "its own database."
+    )
+    with pytest.raises(ValueError, match=expected_message):
+        LiteQueue(conn=connection)
+
+    table_names = connection.execute(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
+    ).fetchall()
+    stored_rows = connection.execute('SELECT "value" FROM "CustomQueue"').fetchall()
+
+    assert [tuple(row) for row in table_names] == [("CustomQueue",)]
+    assert [tuple(row) for row in stored_rows] == [("preserved",)]
+
+
+def test_database_with_queue_and_another_table_is_rejected(tmp_path: Path) -> None:
+    """A database cannot mix the Queue table with another application table."""
+    database_path = tmp_path / "shared.queue.sqlite3"
+    queue = LiteQueue(name="shared", folder=tmp_path)
+    message = queue.put("preserved queue message")
+    queue.close()
+
+    connection = sqlite3.connect(database_path)
+    connection.execute('CREATE TABLE "ApplicationData" ("value" TEXT NOT NULL)')
+    connection.commit()
+
+    with pytest.raises(
+        ValueError,
+        match="Found unsupported table: ApplicationData",
+    ):
+        LiteQueue(conn=connection)
+
+    queue_row = connection.execute(
+        'SELECT "data" FROM "Queue" WHERE "message_id" = :message_id',
+        {"message_id": message.message_id},
+    ).fetchone()
+    assert tuple(queue_row) == ("preserved queue message",)
+
+
+def test_database_error_lists_multiple_unsupported_tables() -> None:
+    """The error identifies every table that prevents single-queue use."""
+    connection = sqlite3.connect(":memory:")
+    connection.execute('CREATE TABLE "Incoming" ("value" TEXT)')
+    connection.execute('CREATE TABLE "Outgoing" ("value" TEXT)')
+
+    with pytest.raises(
+        ValueError,
+        match="Found unsupported tables: Incoming, Outgoing",
+    ):
+        LiteQueue(conn=connection)
+
+    table_names = connection.execute(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
+    ).fetchall()
+    assert [tuple(row) for row in table_names] == [("Incoming",), ("Outgoing",)]
 
 
 def test_insert_pop(single_queue):
@@ -213,7 +320,8 @@ def test_prune(queue_with_data):
 
 
 def test_max_size():
-    q = LiteQueue(":memory:", maxsize=50)
+    connection = sqlite3.connect(":memory:")
+    q = LiteQueue(conn=connection, maxsize=50)
     for i in range(50):
         q.put(f"data_{i}")
     assert q.qsize() == 50
@@ -229,12 +337,11 @@ def test_max_size():
 
 
 def test_maxsize_persists_when_reopened_without_a_value(tmp_path):
-    database_path = tmp_path / "queue.db"
-    queue = LiteQueue(database_path, maxsize=1)
+    queue = LiteQueue(name="queue", folder=tmp_path, maxsize=1)
     queue.put("first")
     queue.close()
 
-    reopened_queue = LiteQueue(database_path)
+    reopened_queue = LiteQueue(name="queue", folder=tmp_path)
 
     assert reopened_queue.maxsize == 1
     assert reopened_queue.full()
@@ -243,10 +350,9 @@ def test_maxsize_persists_when_reopened_without_a_value(tmp_path):
 
 
 def test_maxsize_reopens_with_the_same_value(tmp_path):
-    database_path = tmp_path / "queue.db"
-    LiteQueue(database_path, maxsize=2).close()
+    LiteQueue(name="queue", folder=tmp_path, maxsize=2).close()
 
-    reopened_queue = LiteQueue(database_path, maxsize=2)
+    reopened_queue = LiteQueue(name="queue", folder=tmp_path, maxsize=2)
 
     assert reopened_queue.maxsize == 2
 
@@ -260,24 +366,30 @@ def test_conflicting_maxsize_is_rejected(
     original_maxsize,
     conflicting_maxsize,
 ):
-    database_path = tmp_path / "queue.db"
-    LiteQueue(database_path, maxsize=original_maxsize).close()
+    LiteQueue(
+        name="queue",
+        folder=tmp_path,
+        maxsize=original_maxsize,
+    ).close()
 
     with pytest.raises(ValueError, match="conflicts with stored maxsize"):
-        LiteQueue(database_path, maxsize=conflicting_maxsize)
+        LiteQueue(
+            name="queue",
+            folder=tmp_path,
+            maxsize=conflicting_maxsize,
+        )
 
-    reopened_queue = LiteQueue(database_path)
+    reopened_queue = LiteQueue(name="queue", folder=tmp_path)
     assert reopened_queue.maxsize == original_maxsize
 
 
 def test_concurrent_producers_do_not_exceed_persistent_maxsize(tmp_path):
-    database_path = tmp_path / "queue.db"
-    LiteQueue(database_path, maxsize=5).close()
+    LiteQueue(name="queue", folder=tmp_path, maxsize=5).close()
     barrier = threading.Barrier(10)
     results = []
 
     def put_message(index):
-        queue = LiteQueue(database_path)
+        queue = LiteQueue(name="queue", folder=tmp_path)
         barrier.wait()
         try:
             queue.put(f"message-{index}")
@@ -296,7 +408,7 @@ def test_concurrent_producers_do_not_exceed_persistent_maxsize(tmp_path):
     for thread in threads:
         thread.join()
 
-    queue = LiteQueue(database_path)
+    queue = LiteQueue(name="queue", folder=tmp_path)
     assert results.count(True) == 5
     assert results.count(False) == 5
     assert queue.qsize() == 5
@@ -304,10 +416,9 @@ def test_concurrent_producers_do_not_exceed_persistent_maxsize(tmp_path):
 
 
 def test_zero_maxsize_is_persistent(tmp_path):
-    database_path = tmp_path / "queue.db"
-    LiteQueue(database_path, maxsize=0).close()
+    LiteQueue(name="queue", folder=tmp_path, maxsize=0).close()
 
-    reopened_queue = LiteQueue(database_path)
+    reopened_queue = LiteQueue(name="queue", folder=tmp_path)
 
     assert reopened_queue.maxsize == 0
     assert reopened_queue.full()
@@ -317,20 +428,20 @@ def test_zero_maxsize_is_persistent(tmp_path):
 
 @pytest.mark.parametrize("maxsize", (-1, -10))
 def test_negative_maxsize_is_rejected_before_schema_changes(tmp_path, maxsize):
-    database_path = tmp_path / "queue.db"
+    database_path = tmp_path / "queue.queue.sqlite3"
 
     with pytest.raises(ValueError, match="maxsize must be zero or a positive integer"):
-        LiteQueue(database_path, maxsize=maxsize)
+        LiteQueue(name="queue", folder=tmp_path, maxsize=maxsize)
 
     assert not database_path.exists()
 
 
 @pytest.mark.parametrize("maxsize", (True, 1.5, "2"))
 def test_invalid_maxsize_type_is_rejected_before_schema_changes(tmp_path, maxsize):
-    database_path = tmp_path / "queue.db"
+    database_path = tmp_path / "queue.queue.sqlite3"
 
     with pytest.raises(TypeError, match="maxsize must be an integer or None"):
-        LiteQueue(database_path, maxsize=maxsize)
+        LiteQueue(name="queue", folder=tmp_path, maxsize=maxsize)
 
     assert not database_path.exists()
 
@@ -339,7 +450,8 @@ def test_empty(queue_with_data):
     q = queue_with_data
     assert q.empty() is False
 
-    q2 = LiteQueue(":memory:")
+    connection = sqlite3.connect(":memory:")
+    q2 = LiteQueue(conn=connection)
     assert q2.empty() is True
 
 
@@ -405,28 +517,21 @@ def get_queue_indexes(
     return indexes
 
 
-def test_each_queue_gets_queue_specific_indexes(tmp_path: Path) -> None:
-    """Every queue in one database receives its own complete index set."""
-    database_path = tmp_path / "multiple-queues.sqlite3"
-    first_queue = LiteQueue(database_path, queue_name="incoming")
-    second_queue = LiteQueue(database_path, queue_name="outgoing")
+def test_queue_gets_fixed_indexes() -> None:
+    """The single Queue table receives the fixed unique and FIFO indexes."""
+    connection = sqlite3.connect(":memory:")
+    queue = LiteQueue(conn=connection)
 
-    first_indexes = get_queue_indexes(first_queue, "incoming")
-    second_indexes = get_queue_indexes(second_queue, "outgoing")
-
-    assert first_indexes == {
-        "incoming_message_id_unique_idx": (True, ["message_id"]),
-        "incoming_status_message_id_idx": (False, ["status", "message_id"]),
-    }
-    assert second_indexes == {
-        "outgoing_message_id_unique_idx": (True, ["message_id"]),
-        "outgoing_status_message_id_idx": (False, ["status", "message_id"]),
+    assert get_queue_indexes(queue, "Queue") == {
+        "Queue_message_id_unique_idx": (True, ["message_id"]),
+        "Queue_status_message_id_idx": (False, ["status", "message_id"]),
     }
 
 
 def test_duplicate_message_ids_are_rejected_by_sqlite() -> None:
     """The database, rather than application code, enforces message ID uniqueness."""
-    queue = LiteQueue(":memory:")
+    connection = sqlite3.connect(":memory:")
+    queue = LiteQueue(conn=connection)
     message = queue.put("original")
 
     with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
@@ -467,7 +572,8 @@ def test_duplicate_message_ids_are_rejected_by_sqlite() -> None:
 )
 def test_fifo_queries_use_composite_index_without_temporary_sort(statement: str) -> None:
     """FIFO peek and pop use the composite status/message ID index."""
-    queue = LiteQueue(":memory:")
+    connection = sqlite3.connect(":memory:")
+    queue = LiteQueue(conn=connection)
     plan_rows = queue.conn.execute(
         f"EXPLAIN QUERY PLAN {statement}",
         {"now": time.time_ns()},
@@ -476,68 +582,3 @@ def test_fifo_queries_use_composite_index_without_temporary_sort(statement: str)
 
     assert "Queue_status_message_id_idx" in plan
     assert "USE TEMP B-TREE" not in plan
-
-
-def test_opening_legacy_queue_migrates_indexes(tmp_path: Path) -> None:
-    """Opening an old queue replaces its global indexes without changing rows."""
-    database_path = tmp_path / "legacy.sqlite3"
-    connection = sqlite3.connect(database_path)
-    connection.execute(
-        """
-        CREATE TABLE Queue (
-            data TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            status INTEGER NOT NULL,
-            in_time INTEGER NOT NULL,
-            lock_time INTEGER,
-            done_time INTEGER
-        )
-        """
-    )
-    connection.execute("CREATE INDEX TIdx ON Queue(message_id)")
-    connection.execute("CREATE INDEX SIdx ON Queue(status)")
-    connection.execute(
-        "INSERT INTO Queue VALUES ('preserved', 'id-1', 0, 1, NULL, NULL)"
-    )
-    connection.commit()
-    connection.close()
-
-    queue = LiteQueue(database_path)
-
-    assert queue.get("id-1").data == "preserved"
-    assert get_queue_indexes(queue, "Queue") == {
-        "Queue_message_id_unique_idx": (True, ["message_id"]),
-        "Queue_status_message_id_idx": (False, ["status", "message_id"]),
-    }
-
-
-def test_opening_legacy_queue_with_duplicate_ids_fails(tmp_path: Path) -> None:
-    """Legacy duplicate IDs fail migration instead of being silently removed."""
-    database_path = tmp_path / "legacy-duplicates.sqlite3"
-    connection = sqlite3.connect(database_path)
-    connection.execute(
-        """
-        CREATE TABLE Queue (
-            data TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            status INTEGER NOT NULL,
-            in_time INTEGER NOT NULL,
-            lock_time INTEGER,
-            done_time INTEGER
-        )
-        """
-    )
-    connection.execute(
-        "INSERT INTO Queue VALUES ('first', 'duplicate', 0, 1, NULL, NULL)"
-    )
-    connection.execute(
-        "INSERT INTO Queue VALUES ('second', 'duplicate', 0, 2, NULL, NULL)"
-    )
-    connection.commit()
-
-    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
-        LiteQueue(connection)
-
-    row_count = connection.execute("SELECT COUNT(*) FROM Queue").fetchone()[0]
-    assert row_count == 2
-    connection.close()

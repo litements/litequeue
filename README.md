@@ -28,9 +28,12 @@ Python 3.12 or newer is required.
 ## Quickstart
 
 ```python
+import sqlite3
+
 from litequeue import LiteQueue
 
-q = LiteQueue(":memory:")
+connection = sqlite3.connect(":memory:")
+q = LiteQueue(conn=connection)
 
 q.put("hello")
 q.put("world")
@@ -99,56 +102,32 @@ Publishing is intentionally local-only. Export `UV_PUBLISH_TOKEN`, then run
 `make publish`. The target runs the tests, bumps the minor version, builds the
 distributions, and uploads them with uv.
 
-## Multiple queues in the same DB file
+## One queue per database
 
-In the `LiteQueue` class, the `filename_or_conn` parameter defines the SQLite
-file that will be used to store the messages, the `queue_name` parameter is used
-to define the table name that will be used to store the messages.
-
-Multiple queues in the same SQLite database are supported. Each queue has its
-own unique `message_id` index and a `(status, message_id)` index for FIFO reads.
-You can use different `queue_name` values when initializing `LiteQueue` to
-store multiple queues in the same database file.
+Each LiteQueue queue uses its own SQLite database. Pass `name="email"` to create
+`email.queue.sqlite3`. LiteQueue stores messages in one fixed table named
+`Queue`.
 
 ```python
-import tempfile
+from pathlib import Path
+
 import litequeue
 
+queue_folder = Path("/var/lib/myapp/queues")
+email_queue = litequeue.LiteQueue(name="email", folder=queue_folder)
+image_queue = litequeue.LiteQueue(name="images")
 
-with tempfile.TemporaryDirectory() as tmpdirname:
-
-    db_path = tmpdirname + "/test.sqlite3"
-
-    q1 = litequeue.LiteQueue(db_path, queue_name="q1")
-    q2 = litequeue.LiteQueue(db_path, queue_name="q2")
-
-    q1.put("a")
-    q1.put("b")
-
-    print("Q1 size", q1.qsize())
-
-    print("Q2 size", q2.qsize())
-
-    q2.put("c")
-    q2.put("d")
-
-    print("Q2 size", q2.qsize())
-
-    print(q1.pop())
-    print(q1.peek())
-
-    print(q2.peek())
-    print(q2.pop())
-
+email_queue.put("send welcome email")
+image_queue.put("resize profile photo")
 ```
 
-### Index migration
+`folder` must be an existing `Path`. When omitted, LiteQueue uses `Path.cwd()`.
 
-Opening a queue created by an older LiteQueue version creates the queue-specific
-indexes and removes the old `TIdx` and `SIdx` indexes when they belong to that
-queue. Existing messages are preserved. If an old queue contains duplicate
-`message_id` values, opening it raises `sqlite3.IntegrityError`; duplicates must
-be repaired before LiteQueue can add the unique index.
+Databases containing custom queue tables, multiple queue tables, or unrelated
+application tables are not supported. LiteQueue raises `ValueError` before
+changing their schema. The old `queue_name` argument is no longer supported;
+create a separate `.queue.sqlite3` database for each queue instead. LiteQueue
+does not automatically migrate shared or custom-table databases.
 
 ## Meta
 

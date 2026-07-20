@@ -1,5 +1,4 @@
 import os
-import pathlib
 import pprint
 import re
 import sqlite3
@@ -9,6 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 # Extracted from https://github.com/stevesimmons/uuid7 under MIT license
 
@@ -128,17 +128,7 @@ class Message:
 
 type PopFunction = Callable[[], Message | None]
 
-
-def validate_table_name(name: str) -> str:
-    """
-    Validate a table name.
-    """
-
-    valid_name = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
-    if valid_name is None:
-        raise ValueError(f"Invalid table name: {name}")
-
-    return name
+_QUEUE_TABLE_NAME = "Queue"
 
 
 def validate_maxsize(maxsize: int | None) -> int | None:
@@ -155,19 +145,13 @@ def validate_maxsize(maxsize: int | None) -> int | None:
     return maxsize
 
 
-def quote_identifier(identifier: str) -> str:
-    """Quote a SQLite identifier with double quotes."""
-    escaped_identifier = identifier.replace('"', '""')
-    return f'"{escaped_identifier}"'
-
-
 class LiteQueue:
     def __init__(
         self,
-        filename_or_conn: sqlite3.Connection | str | pathlib.Path | None = None,
-        memory: bool = False,
+        name: str | None = None,
+        conn: sqlite3.Connection | None = None,
+        folder: Path | None = None,
         maxsize: int | None = None,
-        queue_name: str = "Queue",
         sqlite_cache_size_bytes: int = 256_000,
         **kwargs,
     ) -> None:
@@ -175,64 +159,96 @@ class LiteQueue:
         Create a new queue.
 
         Args:
-        - filename_or_conn: str, pathlib.Path, sqlite3.Connection
-        - memory: Whether to use an in-memory database or not (default: False)
+        - name: Queue name. LiteQueue stores it in `<name>.queue.sqlite3`.
+        - conn: Existing SQLite connection to use instead of creating a database.
+        - folder: Directory for a named queue. Defaults to the current directory.
         - maxsize: Maximum number of ready messages allowed in the queue. The
           value is stored as an immutable queue setting. When reopening a
           queue, omit it to use the stored setting or pass the same value.
           Conflicting values raise ValueError. Zero creates a queue that
           cannot accept messages (default: None, unlimited on first creation).
-        - queue_name: Name of the table that will store the messages (default: "Queue")
         - sqlite_cache_size_bytes: Size for the SQLite cache_size in bytes (default: 256_000 [256MB])
 
-        Note, you can store multiple queues in the same database by using
-        different values for `queue_name`, but this is not tested and the
-        performance will be worse than if you have a separate database for each
-        queue. If you need multiple queues, it's recommended to just use
-        different files for each queue.
+        Each database can contain only one LiteQueue queue, stored in the fixed
+        "Queue" table. Other tables are not supported.
 
         """
+        name_was_provided = name is not None
+        connection_was_provided = conn is not None
+        if name_was_provided == connection_was_provided:
+            raise ValueError("Exactly one of name or conn must be provided")
+
+        if name is not None and not isinstance(name, str):
+            raise TypeError("name must be a string")
+
+        if name == "":
+            raise ValueError("name must not be empty")
+
+        if name is not None and Path(name).name != name:
+            raise ValueError("name must not contain a directory path; use folder")
+
+        if conn is not None and not isinstance(conn, sqlite3.Connection):
+            raise TypeError("conn must be a sqlite3.Connection")
+
+        if folder is not None and not isinstance(folder, Path):
+            raise TypeError("folder must be a pathlib.Path or None")
+
+        if conn is not None and folder is not None:
+            raise ValueError("folder cannot be used with conn")
+
+        if conn is not None and kwargs:
+            raise ValueError("SQLite connection options cannot be used with conn")
+
         validated_maxsize = validate_maxsize(maxsize)
 
-        assert (filename_or_conn is not None and not memory) or (
-            filename_or_conn is None and memory
-        ), "Either specify a filename_or_conn or pass memory=True"
-
         assert sqlite_cache_size_bytes > 0
-        validated_name = validate_table_name(queue_name)
         cache_n = -1 * sqlite_cache_size_bytes
 
-        if memory or filename_or_conn == ":memory:":
-            self.conn = sqlite3.connect(":memory:", isolation_level=None, **kwargs)
+        if conn is not None:
+            self.conn = conn
+            self.conn.isolation_level = None
+        else:
+            queue_folder = folder if folder is not None else Path.cwd()
+            if not queue_folder.is_dir():
+                raise ValueError("folder must be an existing directory")
 
-        elif isinstance(filename_or_conn, (str, pathlib.Path)):
+            database_filename = queue_folder / f"{name}.queue.sqlite3"
             self.conn = sqlite3.connect(
-                str(filename_or_conn),
+                str(database_filename),
                 isolation_level=None,
                 check_same_thread=False,
                 **kwargs,
             )
 
-        else:
-            assert filename_or_conn is not None
-            self.conn = filename_or_conn
-            self.conn.isolation_level = None
-
         self.conn.row_factory = sqlite3.Row
 
         self.pop: PopFunction = self._select_pop_func()
 
-        self.table = f'"{validated_name}"'
+        self.table = f'"{_QUEUE_TABLE_NAME}"'
 
         with self.transaction(mode="IMMEDIATE"):
-            table_exists = self.conn.execute(
+            table_rows = self.conn.execute(
                 """
-                SELECT 1
-                FROM sqlite_master
-                WHERE type = 'table' AND name = :table_name COLLATE NOCASE
-                """,
-                {"table_name": validated_name},
-            ).fetchone()
+                SELECT name
+                FROM sqlite_schema
+                WHERE type = 'table' AND name NOT GLOB 'sqlite_*'
+                ORDER BY name
+                """
+            ).fetchall()
+            table_names = [row["name"] for row in table_rows]
+            unsupported_tables = [
+                name for name in table_names if name != _QUEUE_TABLE_NAME
+            ]
+            if unsupported_tables:
+                table_label = "table" if len(unsupported_tables) == 1 else "tables"
+                table_list = ", ".join(unsupported_tables)
+                raise ValueError(
+                    "LiteQueue no longer supports multiple queues or other tables "
+                    f"in one database. Found unsupported {table_label}: {table_list}. "
+                    "Each queue must use its own database."
+                )
+
+            table_exists = bool(table_names)
 
             # int == bool in SQLite
             # will have rowid as primary key by default
@@ -249,32 +265,25 @@ class LiteQueue:
                 """
             )
 
-            message_id_index_name = f"{validated_name}_message_id_unique_idx"
-            quoted_message_id_index = quote_identifier(message_id_index_name)
             self.conn.execute(
-                f"CREATE UNIQUE INDEX IF NOT EXISTS {quoted_message_id_index} "
+                f'CREATE UNIQUE INDEX IF NOT EXISTS "Queue_message_id_unique_idx" '
                 f"ON {self.table}(message_id)"
             )
 
-            fifo_index_name = f"{validated_name}_status_message_id_idx"
-            quoted_fifo_index = quote_identifier(fifo_index_name)
             self.conn.execute(
-                f"CREATE INDEX IF NOT EXISTS {quoted_fifo_index} "
+                f'CREATE INDEX IF NOT EXISTS "Queue_status_message_id_idx" '
                 f"ON {self.table}(status, message_id)"
             )
 
-            self._drop_legacy_index(index_name="TIdx", table_name=validated_name)
-            self._drop_legacy_index(index_name="SIdx", table_name=validated_name)
-
-            stored_maxsize = self._get_stored_maxsize(validated_name)
-            if table_exists is not None:
+            stored_maxsize = self._get_stored_maxsize()
+            if table_exists:
                 maxsize_conflicts = validated_maxsize is not None and (
                     validated_maxsize != stored_maxsize
                 )
                 if maxsize_conflicts:
                     raise ValueError(
                         f"maxsize {validated_maxsize} conflicts with stored maxsize "
-                        f"{stored_maxsize} for queue '{validated_name}'"
+                        f"{stored_maxsize} for queue '{_QUEUE_TABLE_NAME}'"
                     )
 
                 effective_maxsize = stored_maxsize
@@ -282,10 +291,9 @@ class LiteQueue:
                 effective_maxsize = validated_maxsize
 
             if effective_maxsize is not None:
-                trigger_name = f'"maxsize_control_{validated_name}"'
                 self.conn.execute(
                     f"""
-CREATE TRIGGER IF NOT EXISTS {trigger_name}
+CREATE TRIGGER IF NOT EXISTS "maxsize_control_Queue"
    BEFORE INSERT
    ON {self.table}
    WHEN (SELECT COUNT(*) FROM {self.table} WHERE status = {MessageStatus.READY.value}) >= {effective_maxsize}
@@ -302,17 +310,16 @@ END;"""
         self.conn.execute("PRAGMA synchronous = NORMAL;")
         self.conn.execute(f"PRAGMA cache_size = {cache_n};")
 
-    def _get_stored_maxsize(self, queue_name: str) -> int | None:
+    def _get_stored_maxsize(self) -> int | None:
         """Read the immutable capacity from the queue's trigger."""
 
-        trigger_name = f"maxsize_control_{queue_name}"
         trigger = self.conn.execute(
             """
             SELECT sql
             FROM sqlite_master
             WHERE type = 'trigger' AND name = :trigger_name COLLATE NOCASE
             """,
-            {"trigger_name": trigger_name},
+            {"trigger_name": "maxsize_control_Queue"},
         ).fetchone()
         if trigger is None:
             return None
@@ -320,32 +327,10 @@ END;"""
         trigger_sql = trigger["sql"]
         match = re.search(r"Max queue length reached: (-?\d+)", trigger_sql)
         if match is None:
-            raise ValueError(
-                f"Stored maxsize trigger for queue '{queue_name}' is invalid"
-            )
+            raise ValueError("Stored maxsize trigger for queue 'Queue' is invalid")
 
         stored_maxsize = int(match.group(1))
         return validate_maxsize(stored_maxsize)
-
-    def _drop_legacy_index(self, index_name: str, table_name: str) -> None:
-        """Drop a global legacy index only when it belongs to this queue."""
-        index_row = self.conn.execute(
-            """
-            SELECT tbl_name
-            FROM sqlite_schema
-            WHERE type = 'index' AND name = :index_name
-            """,
-            {"index_name": index_name},
-        ).fetchone()
-        if index_row is None:
-            return
-
-        index_belongs_to_queue = index_row["tbl_name"] == table_name
-        if not index_belongs_to_queue:
-            return
-
-        quoted_index_name = quote_identifier(index_name)
-        self.conn.execute(f"DROP INDEX {quoted_index_name}")
 
     def get_sqlite_version(self) -> int:
         sqlite_ver = sqlite3.sqlite_version_info
