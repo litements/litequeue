@@ -18,7 +18,11 @@ Homepage = "https://github.com/litements/litequeue"
 Repository = "https://github.com/litements/litequeue"
 
 [dependency-groups]
-dev = ["pytest>=8.1.1"]
+dev = [
+    "mypy>=2.3.0",
+    "pytest>=8.1.1",
+    "ruff>=0.15.21",
+]
 
 [tool.uv]
 exclude-newer = "1 week"

@@ -29,6 +29,14 @@ clean: ## Clean artifacts
 test: ## Run tests
 	uv run --group dev pytest
 
+.PHONY: typecheck
+typecheck: ## Run static type checks
+	uv run --group dev mypy .
+
+.PHONY: lint
+lint: ## Run lint checks
+	uv run --group dev ruff check .
+
 
 .PHONY: benchmark
 benchmark: ## Run benchmarks
