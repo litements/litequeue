@@ -15,6 +15,12 @@ Messages are interpreted as tasks, so after you `pop` a message, you need to
 mark it as done when you finish processing it. When you run the `.prune()`
 method, it will remove all the finished tasks from the database.
 
+Message IDs follow RFC 9562 UUIDv7: their first 48 bits contain the Unix
+timestamp in milliseconds. Queues created by older LiteQueue versions may
+contain IDs from an earlier UUIDv7 draft. Those IDs remain valid and can coexist
+with RFC UUIDv7 IDs, but the queue sorts lexically by `message_id`. New RFC
+UUIDv7 values can therefore sort before older draft-format IDs.
+
 ## Installation
 
 Install the package with uv:
@@ -140,6 +146,9 @@ Distributed under the MIT license. See `LICENSE` for more information.
 
 ## Important changes
 
+- In version 0.10:
+  - Newly generated message IDs follow RFC 9562 UUIDv7.
+  - Existing draft-format IDs remain supported without migration.
 - In version 0.6:
   - The database schema has changed and the column `message` is now `data`.
   - Time is still measured as an integer, but now it's using nanoseconds.

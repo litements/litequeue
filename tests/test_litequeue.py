@@ -1,16 +1,133 @@
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+import litequeue
 from litequeue import LiteQueue
 from litequeue import MessageStatus
 
 print(sqlite3.sqlite_version)
 
 # https://docs.pytest.org/en/7.1.x/how-to/fixtures.html#parametrizing-fixtures
+
+
+def test_uuid7_matches_rfc_9562_test_vector(monkeypatch) -> None:
+    timestamp_ns = 1_645_557_742_000_000_000
+    counter = (0xCC3 << 30) | 0x18C4DC0C
+    tail = 0x0C07398F
+    monkeypatch.setattr(litequeue.time, "time_ns", lambda: timestamp_ns)
+    monkeypatch.setattr(
+        litequeue,
+        "_uuid7_get_counter_and_tail",
+        lambda: (counter, tail),
+    )
+    monkeypatch.setattr(litequeue, "_last_timestamp_v7", None)
+    monkeypatch.setattr(litequeue, "_last_counter_v7", 0)
+
+    message_id = litequeue.uuid7()
+
+    assert str(message_id) == "017f22e2-79b0-7cc3-98c4-dc0c0c07398f"
+
+
+def test_uuid7_uses_unix_milliseconds_and_rfc_bits(monkeypatch) -> None:
+    timestamp_ms = 1_750_000_123_456
+    monkeypatch.setattr(
+        litequeue.time,
+        "time_ns",
+        lambda: timestamp_ms * 1_000_000,
+    )
+    monkeypatch.setattr(litequeue.os, "urandom", lambda size: bytes(size))
+    monkeypatch.setattr(litequeue, "_last_timestamp_v7", None)
+    monkeypatch.setattr(litequeue, "_last_counter_v7", 0)
+
+    value = litequeue.uuid7()
+    encoded_timestamp_ms = value.int >> 80
+
+    assert encoded_timestamp_ms == timestamp_ms
+    assert value.version == 7
+    assert value.variant == "specified in RFC 4122"
+
+
+def test_uuid7_is_monotonic_when_clock_repeats_or_regresses(monkeypatch) -> None:
+    timestamps_ms = iter((10_000, 10_000, 9_999, 10_001))
+    monkeypatch.setattr(
+        litequeue.time,
+        "time_ns",
+        lambda: next(timestamps_ms) * 1_000_000,
+    )
+    monkeypatch.setattr(litequeue.os, "urandom", lambda size: bytes(size))
+    monkeypatch.setattr(litequeue, "_last_timestamp_v7", None)
+    monkeypatch.setattr(litequeue, "_last_counter_v7", 0)
+
+    message_ids = [litequeue.uuid7() for _ in range(4)]
+
+    assert message_ids == sorted(message_ids)
+    assert len(set(message_ids)) == 4
+
+
+def test_uuid7_is_unique_during_concurrent_generation(monkeypatch) -> None:
+    timestamp_ms = 10_000
+    monkeypatch.setattr(
+        litequeue.time,
+        "time_ns",
+        lambda: timestamp_ms * 1_000_000,
+    )
+    monkeypatch.setattr(litequeue.os, "urandom", lambda size: bytes(size))
+    monkeypatch.setattr(litequeue, "_last_timestamp_v7", None)
+    monkeypatch.setattr(litequeue, "_last_counter_v7", 0)
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        message_ids = list(executor.map(lambda _: litequeue.uuid7(), range(256)))
+
+    uuid_values = sorted(message_id.int for message_id in message_ids)
+    differences = [right - left for left, right in zip(uuid_values, uuid_values[1:])]
+
+    assert len(set(message_ids)) == 256
+    assert differences == [1 << 32] * 255
+
+
+@pytest.mark.parametrize("pop_method", ("_pop_transaction", "_pop_returning"))
+def test_mixed_uuid_formats_sort_by_message_id_after_reopen(
+    tmp_path,
+    monkeypatch,
+    pop_method: str,
+) -> None:
+    old_message_id = "063e95f1-3d9e-7bbc-8000-a6a18a5f65d1"
+    queue = LiteQueue(name="queue", folder=tmp_path)
+    queue.conn.execute(
+        f"""
+        INSERT INTO {queue.table}
+            (data, message_id, status, in_time, lock_time, done_time)
+        VALUES (:data, :message_id, :status, :in_time, NULL, NULL)
+        """,
+        {
+            "data": "old-format",
+            "message_id": old_message_id,
+            "status": MessageStatus.READY.value,
+            "in_time": 1,
+        },
+    )
+    queue.close()
+
+    timestamp_ns = 1_645_557_742_000_000_000
+    monkeypatch.setattr(litequeue.time, "time_ns", lambda: timestamp_ns)
+    monkeypatch.setattr(litequeue.os, "urandom", lambda size: bytes(size))
+    monkeypatch.setattr(litequeue, "_last_timestamp_v7", None)
+    monkeypatch.setattr(litequeue, "_last_counter_v7", 0)
+
+    reopened_queue = LiteQueue(name="queue", folder=tmp_path)
+    reopened_queue.pop = getattr(reopened_queue, pop_method)
+    new_message = reopened_queue.put("rfc-format")
+
+    assert new_message.message_id < old_message_id
+    assert reopened_queue.peek().message_id == new_message.message_id
+    assert reopened_queue.pop().message_id == new_message.message_id
+
+    reopened_queue.close()
 
 
 @pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])

@@ -9,104 +9,78 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-
-# Extracted from https://github.com/stevesimmons/uuid7 under MIT license
+from uuid import UUID
 
 # Expose function used by uuid7() to get current time in nanoseconds
 # since the Unix epoch.
 time_ns = time.time_ns
 
+# Copied from CPython's Lib/uuid.py.
+_RFC_4122_VERSION_7_FLAGS = (7 << 76) | (0x8000 << 48)
+_last_timestamp_v7 = None
+_last_counter_v7 = 0
 
-def uuid7(
-    _last=[0, 0, 0, 0],  # noqa
-    _last_as_of=[0, 0, 0, 0],  # noqa
-) -> str:
-    """
-    UUID v7, following the proposed extension to RFC4122 described in
-    https://www.ietf.org/id/draft-peabody-dispatch-new-uuid-format-02.html.
-    All representations sort chronologically, with a potential time resolution
-    of 50ns (if the system clock supports this).
-    Parameters
-    ----------
-    time_func - Set the time function, which must return integer
-                nanoseconds since the Unix epoch, midnight on 1-Jan-1970.
-                Defaults to time.time_ns(). This is exposed because
-                time.time_ns() may have a low resolution on Windows.
-    _last and _last_as_of - Used internally to trigger incrementing a
-                sequence counter when consecutive calls have the same time
-                values. The values [t1, t2, t3, seq] are described below.
-    Returns
-    -------
-    A UUID object, or if as_type is specified, a string, int or
-    bytes of length 16.
-    Implementation notes
-    --------------------
-    The 128 bits in the UUID are allocated as follows:
-    - 36 bits of whole seconds
-    - 24 bits of fractional seconds, giving approx 50ns resolution
-    - 14 bits of sequential counter, if called repeatedly in same time tick
-    - 48 bits of randomness
-    plus, at locations defined by RFC4122, 4 bits for the
-    uuid version (0b111) and 2 bits for the uuid variant (0b10).
-             0                   1                   2                   3
-             0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-            +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    t1      |                 unixts (secs since epoch)                     |
-            +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    t2/t3   |unixts |  frac secs (12 bits)  |  ver  |  frac secs (12 bits)  |
-            +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    t4/rand |var|       seq (14 bits)       |          rand (16 bits)       |
-            +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    rand    |                          rand (32 bits)                       |
-            +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    Indicative timings:
-    - uuid.uuid4()            2.4us
-    - uuid7(as_type='str')    2.5us
-    Examples
-    --------
-    >>> uuid7()
-    '061cb26a-54b8-7a52-8000-2124e7041024'
-    >>> uuid7(0)
-    '00000000-0000-0000-0000-00000000000'
-    """
-    ns = time_ns()
-    last = _last
 
-    if ns == 0:
-        # Special case for all-zero uuid. Strictly speaking not a UUIDv7.
-        t1 = t2 = t3 = t4 = 0
-        rand = b"\0" * 6
+def _uuid7_get_counter_and_tail() -> tuple[int, int]:
+    """Generate the UUIDv7 counter and random tail."""
+    random_value = int.from_bytes(os.urandom(10))
+    counter = (random_value >> 32) & 0x1FF_FFFF_FFFF
+    tail = random_value & 0xFFFF_FFFF
+    return counter, tail
+
+
+def uuid7() -> UUID:
+    """Generate a UUID from a Unix timestamp in milliseconds and random bits.
+
+    UUIDv7 objects feature monotonicity within a millisecond.
+    """
+    # --- 48 ---   -- 4 --   --- 12 ---   -- 2 --   --- 30 ---   - 32 -
+    # unix_ts_ms | version | counter_hi | variant | counter_lo | random
+    #
+    # 'counter = counter_hi | counter_lo' is a 42-bit counter constructed
+    # with Method 1 of RFC 9562, §6.2, and its MSB is set to 0.
+    #
+    # 'random' is a 32-bit random value regenerated for every new UUID.
+    #
+    # If multiple UUIDs are generated within the same millisecond, the LSB
+    # of 'counter' is incremented by 1. When overflowing, the timestamp is
+    # advanced and the counter is reset to a random 42-bit integer with MSB
+    # set to 0.
+
+    global _last_timestamp_v7
+    global _last_counter_v7
+
+    nanoseconds = time.time_ns()
+    timestamp_ms = nanoseconds // 1_000_000
+
+    if _last_timestamp_v7 is None or timestamp_ms > _last_timestamp_v7:
+        counter, tail = _uuid7_get_counter_and_tail()
     else:
-        # Treat the first 8 bytes of the uuid as a long (t1) and two ints
-        # (t2 and t3) holding 36 bits of whole seconds and 24 bits of
-        # fractional seconds.
-        # This gives a nominal 60ns resolution, comparable to the
-        # timestamp precision in Linux (~200ns) and Windows (100ns ticks).
-        sixteen_secs = 16_000_000_000
-        t1, rest1 = divmod(ns, sixteen_secs)
-        t2, rest2 = divmod(rest1 << 16, sixteen_secs)
-        t3, _ = divmod(rest2 << 12, sixteen_secs)
-        t3 |= 7 << 12  # Put uuid version in top 4 bits, which are 0 in t3
-
-        # The next two bytes are an int (t4) with two bits for
-        # the variant 2 and a 14 bit sequence counter which increments
-        # if the time is unchanged.
-        if t1 == last[0] and t2 == last[1] and t3 == last[2]:
-            # Stop the seq counter wrapping past 0x3FFF.
-            # This won't happen in practice, but if it does,
-            # uuids after the 16383rd with that same timestamp
-            # will not longer be correctly ordered but
-            # are still unique due to the 6 random bytes.
-            if last[3] < 0x3FFF:
-                last[3] += 1
+        if timestamp_ms < _last_timestamp_v7:
+            timestamp_ms = _last_timestamp_v7 + 1
+        counter = _last_counter_v7 + 1
+        if counter > 0x3FF_FFFF_FFFF:
+            timestamp_ms += 1
+            counter, tail = _uuid7_get_counter_and_tail()
         else:
-            last[:] = (t1, t2, t3, 0)
-        t4 = (2 << 14) | last[3]  # Put variant 0b10 in top two bits
+            tail = int.from_bytes(os.urandom(4))
 
-        # Six random bytes for the lower part of the uuid
-        rand = os.urandom(6)
+    unix_ts_ms = timestamp_ms & 0xFFFF_FFFF_FFFF
+    counter_msbs = counter >> 30
+    counter_hi = counter_msbs & 0x0FFF
+    counter_lo = counter & 0x3FFF_FFFF
+    tail &= 0xFFFF_FFFF
 
-    return f"{t1:>08x}-{t2:>04x}-{t3:>04x}-{t4:>04x}-{rand.hex()}"
+    int_uuid_7 = unix_ts_ms << 80
+    int_uuid_7 |= counter_hi << 64
+    int_uuid_7 |= counter_lo << 32
+    int_uuid_7 |= tail
+    int_uuid_7 |= _RFC_4122_VERSION_7_FLAGS
+    result = UUID(int=int_uuid_7)
+
+    _last_timestamp_v7 = timestamp_ms
+    _last_counter_v7 = counter
+    return result
 
 
 class MessageStatus(int, Enum):
@@ -365,7 +339,7 @@ END;"""
         Insert a new message
         """
         # timeout: int = None
-        message_id: str = uuid7()
+        message_id = str(uuid7())
         now = time_ns()
 
         _cursor = self.conn.execute(  # noqa
