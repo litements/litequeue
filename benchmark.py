@@ -119,8 +119,14 @@ def benchmark_pop_method(label: str, method_name: str, item_count: int) -> None:
     for _ in range(item_count):
         queue.pop()
     duration = time.perf_counter() - start
+    operations_per_second = item_count / duration
+    microseconds_per_operation = duration / item_count * 1_000_000
 
-    print(f"{label}: {duration:.3f} seconds for {item_count} messages")
+    print(
+        f"{label}: {duration:.3f} seconds for {item_count} messages, "
+        f"{operations_per_second:,.0f} operations/second, "
+        f"{microseconds_per_operation:.2f} µs/operation"
+    )
     queue.close()
     cleanup_database(database_path)
 

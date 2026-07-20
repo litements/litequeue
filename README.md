@@ -105,10 +105,10 @@ In the `LiteQueue` class, the `filename_or_conn` parameter defines the SQLite
 file that will be used to store the messages, the `queue_name` parameter is used
 to define the table name that will be used to store the messages.
 
-Multiple queues in the same SQLite is supported, but it's neither tested nor
-recommended. But if you need it, you can use different `queue_name` values when
-initializing the `LiteQueue` object to store multiple queues in the same DB
-file.
+Multiple queues in the same SQLite database are supported. Each queue has its
+own unique `message_id` index and a `(status, message_id)` index for FIFO reads.
+You can use different `queue_name` values when initializing `LiteQueue` to
+store multiple queues in the same database file.
 
 ```python
 import tempfile
@@ -141,6 +141,14 @@ with tempfile.TemporaryDirectory() as tmpdirname:
     print(q2.pop())
 
 ```
+
+### Index migration
+
+Opening a queue created by an older LiteQueue version creates the queue-specific
+indexes and removes the old `TIdx` and `SIdx` indexes when they belong to that
+queue. Existing messages are preserved. If an old queue contains duplicate
+`message_id` values, opening it raises `sqlite3.IntegrityError`; duplicates must
+be repaired before LiteQueue can add the unique index.
 
 ## Meta
 

@@ -155,6 +155,12 @@ def validate_maxsize(maxsize: int | None) -> int | None:
     return maxsize
 
 
+def quote_identifier(identifier: str) -> str:
+    """Quote a SQLite identifier with double quotes."""
+    escaped_identifier = identifier.replace('"', '""')
+    return f'"{escaped_identifier}"'
+
+
 class LiteQueue:
     def __init__(
         self,
@@ -243,12 +249,22 @@ class LiteQueue:
                 """
             )
 
+            message_id_index_name = f"{validated_name}_message_id_unique_idx"
+            quoted_message_id_index = quote_identifier(message_id_index_name)
             self.conn.execute(
-                f'CREATE INDEX IF NOT EXISTS "TIdx" ON {self.table}(message_id)'
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {quoted_message_id_index} "
+                f"ON {self.table}(message_id)"
             )
+
+            fifo_index_name = f"{validated_name}_status_message_id_idx"
+            quoted_fifo_index = quote_identifier(fifo_index_name)
             self.conn.execute(
-                f'CREATE INDEX IF NOT EXISTS "SIdx" ON {self.table}(status)'
+                f"CREATE INDEX IF NOT EXISTS {quoted_fifo_index} "
+                f"ON {self.table}(status, message_id)"
             )
+
+            self._drop_legacy_index(index_name="TIdx", table_name=validated_name)
+            self._drop_legacy_index(index_name="SIdx", table_name=validated_name)
 
             stored_maxsize = self._get_stored_maxsize(validated_name)
             if table_exists is not None:
@@ -310,6 +326,26 @@ END;"""
 
         stored_maxsize = int(match.group(1))
         return validate_maxsize(stored_maxsize)
+
+    def _drop_legacy_index(self, index_name: str, table_name: str) -> None:
+        """Drop a global legacy index only when it belongs to this queue."""
+        index_row = self.conn.execute(
+            """
+            SELECT tbl_name
+            FROM sqlite_schema
+            WHERE type = 'index' AND name = :index_name
+            """,
+            {"index_name": index_name},
+        ).fetchone()
+        if index_row is None:
+            return
+
+        index_belongs_to_queue = index_row["tbl_name"] == table_name
+        if not index_belongs_to_queue:
+            return
+
+        quoted_index_name = quote_identifier(index_name)
+        self.conn.execute(f"DROP INDEX {quoted_index_name}")
 
     def get_sqlite_version(self) -> int:
         sqlite_ver = sqlite3.sqlite_version_info
