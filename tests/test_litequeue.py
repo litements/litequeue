@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -222,6 +223,113 @@ def test_max_size():
     q.pop()
 
     assert not q.full()
+
+
+def test_maxsize_persists_when_reopened_without_a_value(tmp_path):
+    database_path = tmp_path / "queue.db"
+    queue = LiteQueue(database_path, maxsize=1)
+    queue.put("first")
+    queue.close()
+
+    reopened_queue = LiteQueue(database_path)
+
+    assert reopened_queue.maxsize == 1
+    assert reopened_queue.full()
+    with pytest.raises(sqlite3.IntegrityError, match="Max queue length reached: 1"):
+        reopened_queue.put("second")
+
+
+def test_maxsize_reopens_with_the_same_value(tmp_path):
+    database_path = tmp_path / "queue.db"
+    LiteQueue(database_path, maxsize=2).close()
+
+    reopened_queue = LiteQueue(database_path, maxsize=2)
+
+    assert reopened_queue.maxsize == 2
+
+
+@pytest.mark.parametrize(
+    ("original_maxsize", "conflicting_maxsize"),
+    ((1, 2), (None, 1)),
+)
+def test_conflicting_maxsize_is_rejected(
+    tmp_path,
+    original_maxsize,
+    conflicting_maxsize,
+):
+    database_path = tmp_path / "queue.db"
+    LiteQueue(database_path, maxsize=original_maxsize).close()
+
+    with pytest.raises(ValueError, match="conflicts with stored maxsize"):
+        LiteQueue(database_path, maxsize=conflicting_maxsize)
+
+    reopened_queue = LiteQueue(database_path)
+    assert reopened_queue.maxsize == original_maxsize
+
+
+def test_concurrent_producers_do_not_exceed_persistent_maxsize(tmp_path):
+    database_path = tmp_path / "queue.db"
+    LiteQueue(database_path, maxsize=5).close()
+    barrier = threading.Barrier(10)
+    results = []
+
+    def put_message(index):
+        queue = LiteQueue(database_path)
+        barrier.wait()
+        try:
+            queue.put(f"message-{index}")
+        except sqlite3.IntegrityError:
+            results.append(False)
+        else:
+            results.append(True)
+        finally:
+            queue.close()
+
+    threads = [
+        threading.Thread(target=put_message, args=(index,)) for index in range(10)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    queue = LiteQueue(database_path)
+    assert results.count(True) == 5
+    assert results.count(False) == 5
+    assert queue.qsize() == 5
+    assert queue.full()
+
+
+def test_zero_maxsize_is_persistent(tmp_path):
+    database_path = tmp_path / "queue.db"
+    LiteQueue(database_path, maxsize=0).close()
+
+    reopened_queue = LiteQueue(database_path)
+
+    assert reopened_queue.maxsize == 0
+    assert reopened_queue.full()
+    with pytest.raises(sqlite3.IntegrityError, match="Max queue length reached: 0"):
+        reopened_queue.put("message")
+
+
+@pytest.mark.parametrize("maxsize", (-1, -10))
+def test_negative_maxsize_is_rejected_before_schema_changes(tmp_path, maxsize):
+    database_path = tmp_path / "queue.db"
+
+    with pytest.raises(ValueError, match="maxsize must be zero or a positive integer"):
+        LiteQueue(database_path, maxsize=maxsize)
+
+    assert not database_path.exists()
+
+
+@pytest.mark.parametrize("maxsize", (True, 1.5, "2"))
+def test_invalid_maxsize_type_is_rejected_before_schema_changes(tmp_path, maxsize):
+    database_path = tmp_path / "queue.db"
+
+    with pytest.raises(TypeError, match="maxsize must be an integer or None"):
+        LiteQueue(database_path, maxsize=maxsize)
+
+    assert not database_path.exists()
 
 
 def test_empty(queue_with_data):
