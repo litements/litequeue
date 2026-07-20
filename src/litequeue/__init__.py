@@ -1,6 +1,7 @@
 import os
 import pathlib
 import pprint
+import re
 import sqlite3
 import time
 from collections.abc import Callable
@@ -133,9 +134,10 @@ def validate_table_name(name: str) -> str:
     Validate a table name.
     """
 
-    for char in "[]'`\"":
-        if char in name:
-            raise ValueError(f"Invalid table name: {name}")
+    valid_name = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+    if valid_name is None:
+        raise ValueError(f"Invalid table name: {name}")
+
     return name
 
 
@@ -171,6 +173,7 @@ class LiteQueue:
         ), "Either specify a filename_or_conn or pass memory=True"
 
         assert sqlite_cache_size_bytes > 0
+        validated_name = validate_table_name(queue_name)
         cache_n = -1 * sqlite_cache_size_bytes
 
         if memory or filename_or_conn == ":memory:":
@@ -194,8 +197,7 @@ class LiteQueue:
 
         self.pop: PopFunction = self._select_pop_func()
 
-        validated_name = validate_table_name(queue_name)
-        self.table = f"[{validated_name}]"
+        self.table = f'"{validated_name}"'
 
         with self.transaction():
             # int == bool in SQLite
@@ -214,10 +216,10 @@ class LiteQueue:
             )
 
             self.conn.execute(
-                f"CREATE INDEX IF NOT EXISTS TIdx ON {self.table}(message_id)"
+                f'CREATE INDEX IF NOT EXISTS "TIdx" ON {self.table}(message_id)'
             )
             self.conn.execute(
-                f"CREATE INDEX IF NOT EXISTS SIdx ON {self.table}(status)"
+                f'CREATE INDEX IF NOT EXISTS "SIdx" ON {self.table}(status)'
             )
 
         # if fast:
@@ -227,9 +229,10 @@ class LiteQueue:
         self.conn.execute(f"PRAGMA cache_size = {cache_n};")
 
         if self.maxsize is not None:
+            trigger_name = f'"maxsize_control_{validated_name}"'
             self.conn.execute(
                 f"""
-CREATE TRIGGER IF NOT EXISTS maxsize_control_{validated_name}
+CREATE TRIGGER IF NOT EXISTS {trigger_name}
    BEFORE INSERT
    ON {self.table}
    WHEN (SELECT COUNT(*) FROM {self.table} WHERE status = {MessageStatus.READY.value}) >= {self.maxsize}

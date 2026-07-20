@@ -54,6 +54,74 @@ def test_isolation_level(kwargs):
     ), f"Isolation level not set properly for connection '{kwargs}'"
 
 
+@pytest.mark.parametrize(
+    "queue_name",
+    (
+        "",
+        "queue name",
+        "queue;name",
+        "queue--name",
+        "queue/*name*/",
+        "1queue",
+        "café",
+        "evil BEFORE INSERT ON victim BEGIN DELETE FROM victim; END; /*",
+    ),
+)
+def test_invalid_queue_name_is_rejected_before_schema_changes(queue_name: str) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute('CREATE TABLE "victim" ("value" TEXT NOT NULL)')
+    conn.execute(
+        'INSERT INTO "victim" ("value") VALUES (:value)',
+        {"value": "safe"},
+    )
+
+    with pytest.raises(ValueError, match="Invalid table name"):
+        LiteQueue(filename_or_conn=conn, maxsize=1, queue_name=queue_name)
+
+    schema_objects = conn.execute(
+        'SELECT "name" FROM "sqlite_master" WHERE "name" != :name',
+        {"name": "victim"},
+    ).fetchall()
+    victim_rows = conn.execute('SELECT "value" FROM "victim"').fetchall()
+
+    assert schema_objects == []
+    assert victim_rows == [("safe",)]
+
+
+@pytest.mark.parametrize("queue_name", ("Queue", "custom_queue_2", "_private", "select"))
+def test_valid_queue_names_create_safely_quoted_schema(queue_name: str) -> None:
+    q = LiteQueue(filename_or_conn=":memory:", maxsize=1, queue_name=queue_name)
+    trigger_name = f"maxsize_control_{queue_name}"
+
+    table = q.conn.execute(
+        'SELECT "sql" FROM "sqlite_master" WHERE "type" = :type AND "name" = :name',
+        {"type": "table", "name": queue_name},
+    ).fetchone()
+    indexes = q.conn.execute(
+        'SELECT "sql" FROM "sqlite_master" WHERE "type" = :type ORDER BY "name"',
+        {"type": "index"},
+    ).fetchall()
+    trigger = q.conn.execute(
+        'SELECT "sql" FROM "sqlite_master" WHERE "type" = :type AND "name" = :name',
+        {"type": "trigger", "name": trigger_name},
+    ).fetchone()
+
+    index_sql = [index[0] for index in indexes]
+
+    assert table is not None
+    assert f'CREATE TABLE "{queue_name}"' in table[0]
+    assert index_sql == [
+        f'CREATE INDEX "SIdx" ON "{queue_name}"(status)',
+        f'CREATE INDEX "TIdx" ON "{queue_name}"(message_id)',
+    ]
+    assert trigger is not None
+    assert f'CREATE TRIGGER "{trigger_name}"' in trigger[0]
+    assert f'ON "{queue_name}"' in trigger[0]
+
+    message = q.put("hello")
+    assert q.get(message.message_id) is not None
+
+
 def test_insert_pop(single_queue):
     q = single_queue
     first = q.put("hello")
