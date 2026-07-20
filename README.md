@@ -95,6 +95,39 @@ limit, or pass the same value. Passing a conflicting value raises `ValueError`.
 For a new queue, `None` means unlimited and `0` creates a queue that cannot
 accept messages.
 
+## Thread safety
+
+A named `LiteQueue` instance can be shared between threads. It uses one
+connection for writes and explicit transactions, plus a fixed pool of ten
+query-only connections for reads. A read checks out one connection for the
+duration of the operation and always returns it afterward. Reads can continue
+during a write transaction and see only committed data. A reentrant write lock
+prevents concurrent consumers from claiming the same message or entering
+another thread's transaction.
+
+When supplying `conn`, create it with `check_same_thread=False` before sharing
+the queue between threads:
+
+```python
+connection = sqlite3.connect(
+    ":memory:",
+    check_same_thread=False,
+    cached_statements=0,
+)
+queue = LiteQueue(conn=connection)
+```
+
+LiteQueue cannot change these settings or reliably reopen an existing
+connection. A queue created with `conn` therefore uses that connection for both
+reads and writes and serializes all access to it. Named queues get the separate
+read connection and allow reads to proceed during writes.
+
+An explicit `queue.transaction()` excludes other writers until it commits or
+rolls back. Reads in the transaction-owning thread use the write connection so
+they can see their own uncommitted changes; pooled readers in other threads
+continue and see the last committed state. `queue.close()` drains the read pool
+and waits for active reads and writes to finish.
+
 ## Examples and benchmarks
 
 You can have a look at the `tests/` folder. The tests are short and showcase

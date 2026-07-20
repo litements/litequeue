@@ -91,11 +91,9 @@ def test_uuid7_is_unique_during_concurrent_generation(monkeypatch) -> None:
     assert differences == [1 << 32] * 255
 
 
-@pytest.mark.parametrize("pop_method", ("_pop_transaction", "_pop_returning"))
 def test_mixed_uuid_formats_sort_by_message_id_after_reopen(
     tmp_path,
     monkeypatch,
-    pop_method: str,
 ) -> None:
     old_message_id = "063e95f1-3d9e-7bbc-8000-a6a18a5f65d1"
     queue = LiteQueue(name="queue", folder=tmp_path)
@@ -121,7 +119,6 @@ def test_mixed_uuid_formats_sort_by_message_id_after_reopen(
     monkeypatch.setattr(litequeue, "_last_counter_v7", 0)
 
     reopened_queue = LiteQueue(name="queue", folder=tmp_path)
-    reopened_queue.pop = getattr(reopened_queue, pop_method)
     new_message = reopened_queue.put("rfc-format")
 
     assert new_message.message_id < old_message_id
@@ -131,14 +128,10 @@ def test_mixed_uuid_formats_sort_by_message_id_after_reopen(
     reopened_queue.close()
 
 
-@pytest.fixture(scope="function", params=["_pop_transaction", "_pop_returning"])
-def single_queue(request) -> LiteQueue:
+@pytest.fixture(scope="function")
+def single_queue() -> LiteQueue:
     connection = sqlite3.connect(":memory:")
     _q = LiteQueue(conn=connection)
-
-    if _q.get_sqlite_version() > 35:
-        _q.pop = getattr(_q, request.param)
-
     return _q
 
 
@@ -160,6 +153,27 @@ def test_existing_connection_is_used_in_autocommit_mode() -> None:
 
     assert queue.conn is connection
     assert queue.conn.isolation_level is None
+
+
+@pytest.mark.parametrize(
+    ("sqlite_version", "expected_pop_method"),
+    (
+        ((3, 34, 0), "_pop_transaction"),
+        ((3, 35, 0), "_pop_returning"),
+    ),
+)
+def test_selects_pop_method_for_sqlite_features(
+    monkeypatch,
+    sqlite_version: tuple[int, int, int],
+    expected_pop_method: str,
+) -> None:
+    """Pop uses RETURNING when SQLite supports it and the fallback otherwise."""
+    monkeypatch.setattr(litequeue.sqlite3, "sqlite_version_info", sqlite_version)
+    connection = sqlite3.connect(":memory:")
+
+    queue = LiteQueue(conn=connection)
+
+    assert queue.pop == getattr(queue, expected_pop_method)
 
 
 @pytest.mark.parametrize(

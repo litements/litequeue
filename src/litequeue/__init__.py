@@ -2,6 +2,7 @@ import os
 import pprint
 import re
 import sqlite3
+import threading
 import time
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from dataclasses import replace
 from enum import Enum
 from pathlib import Path
+from queue import Queue
 from uuid import UUID
 
 # Expose function used by uuid7() to get current time in nanoseconds
@@ -123,6 +125,7 @@ def _message_from_row(row: sqlite3.Row) -> Message:
 type PopFunction = Callable[[], Message | None]
 
 _QUEUE_TABLE_NAME = "Queue"
+_READ_CONNECTION_POOL_SIZE = 10
 
 
 def validate_maxsize(maxsize: int | None) -> int | None:
@@ -166,6 +169,15 @@ class LiteQueue:
         Each database can contain only one LiteQueue queue, stored in the fixed
         "Queue" table. Other tables are not supported.
 
+        One LiteQueue instance can be shared between threads when SQLite was
+        compiled in serialized mode, as in standard CPython builds. LiteQueue
+        serializes writes and explicit transactions while a read-only pool
+        serves committed data to other threads.
+        A connection supplied with ``conn`` must have been created with
+        ``check_same_thread=False`` and ``cached_statements=0`` to be used from
+        multiple threads. Caller-supplied connections cannot use the internal
+        read pool, so all of their operations are serialized.
+
         """
         name_was_provided = name is not None
         connection_was_provided = conn is not None
@@ -198,6 +210,11 @@ class LiteQueue:
         assert sqlite_cache_size_bytes > 0
         cache_n = -1 * sqlite_cache_size_bytes
 
+        self._connection_lock = threading.RLock()
+        self._transaction_owner: int | None = None
+        self._close_state_lock = threading.Lock()
+        self._is_closed = False
+
         if conn is not None:
             self.conn = conn
             self.conn.isolation_level = None
@@ -211,6 +228,9 @@ class LiteQueue:
                 str(database_filename),
                 isolation_level=None,
                 check_same_thread=False,
+                # Disable cached statements due to a bug in CPython >= 3.12.
+                # https://github.com/python/cpython/issues/118172
+                cached_statements=0,
                 **kwargs,
             )
 
@@ -304,6 +324,36 @@ END;"""
         self.conn.execute("PRAGMA synchronous = NORMAL;")
         self.conn.execute(f"PRAGMA cache_size = {cache_n};")
 
+        # Separate read connections prevent reads in one thread from joining
+        # another thread's write transaction and observing data that may still
+        # be rolled back. A small fixed pool also allows unrelated reads to run
+        # concurrently without creating an unbounded number of file handles.
+        #
+        # Caller-owned connections cannot be reopened reliably (an in-memory
+        # database has no path), so those queues retain the write connection and
+        # its lock for reads.
+        self._read_connections: Queue[sqlite3.Connection] | None = None
+        if conn is None:
+            read_connections: Queue[sqlite3.Connection] = Queue(
+                maxsize=_READ_CONNECTION_POOL_SIZE
+            )
+            for _ in range(_READ_CONNECTION_POOL_SIZE):
+                read_connection = sqlite3.connect(
+                    str(database_filename),
+                    isolation_level=None,
+                    check_same_thread=False,
+                    # Disable cached statements due to a bug in CPython >= 3.12.
+                    # https://github.com/python/cpython/issues/118172
+                    cached_statements=0,
+                    **kwargs,
+                )
+                read_connection.row_factory = sqlite3.Row
+                # This is a second line of defense against accidentally routing
+                # a mutation through the pool in a future code change.
+                read_connection.execute("PRAGMA query_only = ON;")
+                read_connections.put(read_connection)
+            self._read_connections = read_connections
+
     def _get_stored_maxsize(self) -> int | None:
         """Read the immutable capacity from the queue's trigger."""
 
@@ -338,21 +388,13 @@ END;"""
         return v_min
 
     def _select_pop_func(self) -> PopFunction:
-        """
-        Decide which message pop() logic to use
-        depending on the sqlite version.
-        """
+        """Select the fastest pop implementation supported by SQLite."""
+        sqlite_minor_version = self.get_sqlite_version()
 
-        v = self.get_sqlite_version()
-
-        if v >= 35:
-            # RETURNING clause available
+        if sqlite_minor_version >= 35:
             return self._pop_returning
 
-        else:
-            # RETURNING clause unavailable
-            # use custom locking logic
-            return self._pop_transaction
+        return self._pop_transaction
 
     def put(self, data: str) -> Message:
         """
@@ -362,15 +404,16 @@ END;"""
         message_id = str(uuid7())
         now = time_ns()
 
-        _cursor = self.conn.execute(  # noqa
-            f"""
-            INSERT INTO
-              {self.table}
-                   (  data,  message_id, status,                      in_time, lock_time, done_time )
-            VALUES ( :data, :message_id, {MessageStatus.READY.value}, :now   , NULL     , NULL      )
-            """.strip(),
-            {"data": data, "message_id": message_id, "now": now},
-        )
+        with self._connection_lock:
+            self.conn.execute(
+                f"""
+                INSERT INTO
+                  {self.table}
+                       (  data,  message_id, status,                      in_time, lock_time, done_time )
+                VALUES ( :data, :message_id, {MessageStatus.READY.value}, :now   , NULL     , NULL      )
+                """.strip(),
+                {"data": data, "message_id": message_id, "now": now},
+            )
 
         return Message(
             data=data,
@@ -382,7 +425,6 @@ END;"""
         )
 
     def _pop_returning(self) -> Message | None:
-        # this should happen all inside a single transaction
         with self.transaction(mode="IMMEDIATE"):
             message = self.conn.execute(
                 f"""
@@ -404,47 +446,28 @@ END;"""
             return _message_from_row(message)
 
     def _pop_transaction(self) -> Message | None:
-        """
-        Pop from the queue using a transaction and custom locking logic.
-        This function should be used with SQLite versions < 3.35.0
-        since that's when the UPDATE ... RETURNING clause was introduced.
-        """
-
-        # lastrowid not working as I expected when executing
-        # updates inside a transaction
-
-        # this should happen all inside a single transaction
+        """Claim one message on SQLite versions without RETURNING support."""
         with self.transaction(mode="IMMEDIATE"):
-            # the `pop` action happens in 3 steps that happen inside a transaction
-            # 1: select the first undone message
-            # 2: lock the message to avoid another process from getting it too
-            # 3: return the selected message
-            # I think there's a chance that 2 processes lock the same row, there are 2
-            # mechanisms to deal with it:
-            # * Using the "IMMEDIATE" mode for the transaction, which locks the database immediately.
-            # * When doing the UPDATE statement, the condition checks the status again.
             message = self.conn.execute(
                 f"""
-            SELECT * FROM {self.table}
-            WHERE rowid = (SELECT rowid
-                           FROM {self.table}
-                           WHERE status = {MessageStatus.READY.value}
-                           ORDER BY message_id
-                           LIMIT 1)
-            """.strip()
+                SELECT * FROM {self.table}
+                WHERE status = {MessageStatus.READY.value}
+                ORDER BY message_id
+                LIMIT 1
+                """.strip()
             ).fetchone()
 
             if message is None:
                 return None
 
             lock_time = time_ns()
-
             self.conn.execute(
                 f"""
                 UPDATE {self.table} SET
                   status = {MessageStatus.LOCKED.value}
                   , lock_time = :lock_time
-                WHERE message_id = :message_id AND status = {MessageStatus.READY.value}
+                WHERE message_id = :message_id
+                  AND status = {MessageStatus.READY.value}
                 """.strip(),
                 {
                     "lock_time": lock_time,
@@ -452,8 +475,6 @@ END;"""
                 },
             )
 
-            # We have updated the status in the database, so update the typed
-            # message before returning it to the user.
             selected_message = _message_from_row(message)
             return replace(
                 selected_message,
@@ -461,22 +482,62 @@ END;"""
                 lock_time=lock_time,
             )
 
+    @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        """Check out a read connection with correct transaction visibility."""
+        current_thread = threading.get_ident()
+        transaction_is_owned = self._transaction_owner == current_thread
+        if transaction_is_owned:
+            # The transaction owner must read through the write connection to
+            # see its own uncommitted changes. RLock makes this reacquisition
+            # safe while transaction() already holds the write lock.
+            with self._connection_lock:
+                yield self.conn
+            return
+
+        read_connections = self._read_connections
+        if read_connections is None:
+            # A caller-supplied connection may be in-memory and impossible to
+            # reopen. Serializing its reads is the only way to stop them from
+            # entering another thread's transaction on the same connection.
+            with self._connection_lock:
+                yield self.conn
+            return
+
+        with self._close_state_lock:
+            if self._is_closed:
+                raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+            # Checkout happens while holding the close-state lock so close()
+            # cannot drain the pool between the closed check and Queue.get().
+            # Returning a connection never needs this lock, so waiting here
+            # cannot prevent an active reader from releasing a pool slot.
+            read_connection = read_connections.get()
+
+        try:
+            yield read_connection
+        finally:
+            # Always return the connection, including when row conversion or a
+            # SQLite call fails, so one error cannot slowly exhaust the pool.
+            read_connections.put(read_connection)
+
     def peek(self) -> Message | None:
         "Show next message to be popped, if any."
 
-        value = self.conn.execute(
-            f"SELECT * FROM {self.table} WHERE status = {MessageStatus.READY.value} ORDER BY message_id LIMIT 1",
-        ).fetchone()
+        with self._read_connection() as connection:
+            value = connection.execute(
+                f"SELECT * FROM {self.table} WHERE status = {MessageStatus.READY.value} ORDER BY message_id LIMIT 1",
+            ).fetchone()
 
         return _message_from_row(value) if value is not None else None
 
     def get(self, message_id: str) -> Message | None:
         "Get a message by its `message_id`"
 
-        value = self.conn.execute(
-            f"SELECT * FROM {self.table} WHERE message_id = :message_id",
-            {"message_id": message_id},
-        ).fetchone()
+        with self._read_connection() as connection:
+            value = connection.execute(
+                f"SELECT * FROM {self.table} WHERE message_id = :message_id",
+                {"message_id": message_id},
+            ).fetchone()
 
         return _message_from_row(value) if value is not None else None
 
@@ -491,15 +552,16 @@ END;"""
 
         now = time_ns()
 
-        cursor = self.conn.execute(
-            f"""
-            UPDATE {self.table} SET
-              status = {MessageStatus.DONE.value}
-              , done_time = :now
-            WHERE message_id = :message_id
-            """.strip(),
-            {"now": now, "message_id": message_id},
-        )
+        with self._connection_lock:
+            cursor = self.conn.execute(
+                f"""
+                UPDATE {self.table} SET
+                  status = {MessageStatus.DONE.value}
+                  , done_time = :now
+                WHERE message_id = :message_id
+                """.strip(),
+                {"now": now, "message_id": message_id},
+            )
 
         return cursor.rowcount > 0
 
@@ -510,15 +572,16 @@ END;"""
         Return `True` when the message exists, otherwise `False`.
         """
 
-        cursor = self.conn.execute(
-            f"""
-            UPDATE {self.table} SET
-              status = {MessageStatus.FAILED.value}
-              , done_time = :now
-            WHERE message_id = :message_id
-            """.strip(),
-            {"now": time_ns(), "message_id": message_id},
-        )
+        with self._connection_lock:
+            cursor = self.conn.execute(
+                f"""
+                UPDATE {self.table} SET
+                  status = {MessageStatus.FAILED.value}
+                  , done_time = :now
+                WHERE message_id = :message_id
+                """.strip(),
+                {"now": time_ns(), "message_id": message_id},
+            )
 
         return cursor.rowcount > 0
 
@@ -530,17 +593,18 @@ END;"""
 
         threshold_nanoseconds = threshold_seconds * 1e9
 
-        cursor = self.conn.execute(
-            f"""
-            SELECT * FROM {self.table}
-            WHERE
-              status = {MessageStatus.LOCKED.value}
-              AND  lock_time < :time_value
-            """.strip(),
-            {"time_value": time_ns() - threshold_nanoseconds},
-        )
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM {self.table}
+                WHERE
+                  status = {MessageStatus.LOCKED.value}
+                  AND  lock_time < :time_value
+                """.strip(),
+                {"time_value": time_ns() - threshold_nanoseconds},
+            ).fetchall()
 
-        for result in cursor:
+        for result in rows:
             yield _message_from_row(result)
 
     def list_failed(self) -> Iterator[Message]:
@@ -548,15 +612,16 @@ END;"""
         Return all the tasks in `FAILED` state.
         """
 
-        cursor = self.conn.execute(
-            f"""
-            SELECT * FROM {self.table}
-            WHERE
-              status = {MessageStatus.FAILED.value}
-            """.strip()
-        )
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM {self.table}
+                WHERE
+                  status = {MessageStatus.FAILED.value}
+                """.strip()
+            ).fetchall()
 
-        for result in cursor:
+        for result in rows:
             yield _message_from_row(result)
 
     def retry(self, message_id: str) -> bool:
@@ -566,15 +631,16 @@ END;"""
         Return `True` when the message exists, otherwise `False`.
         """
 
-        cursor = self.conn.execute(
-            f"""
-            UPDATE {self.table} SET
-              status = {MessageStatus.READY.value}
-              , done_time = NULL
-            WHERE message_id = :message_id
-            """.strip(),
-            {"message_id": message_id},
-        )
+        with self._connection_lock:
+            cursor = self.conn.execute(
+                f"""
+                UPDATE {self.table} SET
+                  status = {MessageStatus.READY.value}
+                  , done_time = NULL
+                WHERE message_id = :message_id
+                """.strip(),
+                {"message_id": message_id},
+            )
 
         return cursor.rowcount > 0
 
@@ -583,23 +649,26 @@ END;"""
         Get current size of the queue.
         """
 
-        cursor = self.conn.execute(
-            f"""
-        SELECT COUNT(*) FROM {self.table}
-        WHERE status NOT IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})
-        """.strip()
-        )
+        with self._read_connection() as connection:
+            cursor = connection.execute(
+                f"""
+            SELECT COUNT(*) FROM {self.table}
+            WHERE status NOT IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})
+            """.strip()
+            )
+            size = next(cursor)[0]
 
-        return next(cursor)[0]
+        return size
 
     def empty(self) -> bool:
         """
         Return True if the queue is empty.
         """
 
-        value = self.conn.execute(
-            f"SELECT COUNT(*) as cnt FROM {self.table} WHERE status = {MessageStatus.READY.value}"
-        ).fetchone()
+        with self._read_connection() as connection:
+            value = connection.execute(
+                f"SELECT COUNT(*) as cnt FROM {self.table} WHERE status = {MessageStatus.READY.value}"
+            ).fetchone()
         return not bool(value["cnt"])
 
     def full(self) -> bool:
@@ -612,9 +681,10 @@ END;"""
         if self.maxsize is None:
             return False
 
-        value = self.conn.execute(
-            f"SELECT COUNT(*) as cnt FROM {self.table} WHERE status = {MessageStatus.READY.value}"
-        ).fetchone()
+        with self._read_connection() as connection:
+            value = connection.execute(
+                f"SELECT COUNT(*) as cnt FROM {self.table} WHERE status = {MessageStatus.READY.value}"
+            ).fetchone()
 
         if value["cnt"] >= self.maxsize:
             return True
@@ -627,14 +697,15 @@ END;"""
 
         If `include_failed` is True, the messages in `FAILED` state will be deleted too.
         """
-        if include_failed:
-            self.conn.execute(
-                f"DELETE FROM {self.table} WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
-            )
-        else:
-            self.conn.execute(
-                f"DELETE FROM {self.table} WHERE status IN ({MessageStatus.DONE.value})"
-            )
+        with self._connection_lock:
+            if include_failed:
+                self.conn.execute(
+                    f"DELETE FROM {self.table} WHERE status IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})"
+                )
+            else:
+                self.conn.execute(
+                    f"DELETE FROM {self.table} WHERE status IN ({MessageStatus.DONE.value})"
+                )
 
     def vacuum(self) -> None:
         """
@@ -643,34 +714,60 @@ END;"""
         IMPORTANT: The `VACUUM` step can take some time to finish depending on
         the size of the queue and how many messages have been deleted.
         """
-        self.conn.execute("VACUUM;")
+        with self._connection_lock:
+            self.conn.execute("VACUUM;")
 
     # SQLite works better in autocommit mode when using short DML (INSERT /
     # UPDATE / DELETE) statements
     @contextmanager
     def transaction(self, mode: str = "DEFERRED") -> Iterator[None]:
+        """Run a transaction while excluding other threads from the connection."""
         if mode not in {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}:
             raise ValueError(f"Transaction mode '{mode}' is not valid")
-        # We must issue a "BEGIN" explicitly when running in auto-commit mode.
-        self.conn.execute(f"BEGIN {mode}")
-        try:
-            # Yield control back to the caller.
-            yield
-        except BaseException as e:
-            self.conn.rollback()  # Roll back all changes if an exception occurs.
-            raise e
-        else:
-            self.conn.commit()
+        with self._connection_lock:
+            # We must issue a "BEGIN" explicitly when running in auto-commit mode.
+            self.conn.execute(f"BEGIN {mode}")
+            self._transaction_owner = threading.get_ident()
+            try:
+                # Yield control back to the caller.
+                yield
+            except BaseException:
+                self.conn.rollback()  # Roll back all changes if an exception occurs.
+                raise
+            else:
+                self.conn.commit()
+            finally:
+                self._transaction_owner = None
 
     def __repr__(self) -> str:
-        display_items = [
-            _message_from_row(x)
-            for x in self.conn.execute(f"SELECT * FROM {self.table} LIMIT 3").fetchall()
-        ]
-        return f"{type(self).__name__}(Connection={self.conn!r}, items={pprint.pformat(display_items)})"
+        with self._read_connection() as connection:
+            rows = connection.execute(f"SELECT * FROM {self.table} LIMIT 3").fetchall()
+            display_items = [_message_from_row(row) for row in rows]
+            connection_repr = repr(self.conn)
+
+        items = pprint.pformat(display_items)
+        return f"{type(self).__name__}(Connection={connection_repr}, items={items})"
 
     def close(self) -> None:
-        self.conn.close()
+        with self._connection_lock:
+            with self._close_state_lock:
+                if self._is_closed:
+                    return
+                self._is_closed = True
+
+            read_connections = self._read_connections
+            if read_connections is not None:
+                # Draining all ten slots waits for checked-out readers to finish.
+                # Once _is_closed is set, new readers return their slot and fail,
+                # so they cannot race shutdown or use a closed connection.
+                connections_to_close = [
+                    read_connections.get()
+                    for _ in range(_READ_CONNECTION_POOL_SIZE)
+                ]
+                for read_connection in connections_to_close:
+                    read_connection.close()
+
+            self.conn.close()
 
 
 # Kept for backwards compatibility
