@@ -21,7 +21,7 @@ time_ns = time.time_ns
 
 # Copied from CPython's Lib/uuid.py.
 _RFC_4122_VERSION_7_FLAGS = (7 << 76) | (0x8000 << 48)
-_last_timestamp_v7 = None
+_last_timestamp_v7: int | None = None
 _last_counter_v7 = 0
 
 
