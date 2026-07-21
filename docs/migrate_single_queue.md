@@ -4,6 +4,9 @@ This procedure migrates a shared LiteQueue database to the single-queue architec
 It creates one SQLite database for each queue table.
 It does not change the source database.
 
+This migration is required before you use LiteQueue 0.10 or later with version 0.9 databases.
+Complete this migration before you start an application that uses LiteQueue 0.10 or later.
+
 The procedure preserves these message fields:
 
 - `data`.
@@ -18,7 +21,7 @@ The new database uses the fixed table name `Queue`.
 
 ## Requirements
 
-Use this procedure for a database from the LiteQueue release before the single-queue change.
+Use this procedure for a database created by LiteQueue 0.9.
 The source queue tables must use the six columns listed above.
 
 Install the `sqlite3` command-line tool before you start.

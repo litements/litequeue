@@ -173,6 +173,9 @@ distributions, and uploads them with uv.
 ## Important changes
 
 - In version 0.10:
+  - Each SQLite database can contain only one LiteQueue queue.
+  - You must migrate version 0.9 queues before you use version 0.10 or later.
+  - Follow the [single-queue migration guide](docs/migrate_single_queue.md).
   - Newly generated message IDs follow RFC 9562 UUIDv7.
   - Existing draft-format IDs remain supported without migration.
 - In version 0.6:
