@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "litequeue>=0.11",
+#   "litequeue>=0.12",
 # ]
 # ///
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from litequeue import LiteQueue
 
-QUEUE_FILE = Path(__file__).with_name("tasks.sqlite3")
+QUEUE_FILE = Path.cwd() / "tasks.sqlite3"
 IDLE_TIMEOUT_SECONDS = 3
 MAX_ATTEMPTS = 3
 FAILURE_RATE = 0.2

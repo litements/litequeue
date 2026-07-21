@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "litequeue>=0.11",
+#   "litequeue>=0.12",
 # ]
 # ///
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from litequeue import LiteQueue
 
-QUEUE_FILE = Path(__file__).with_name("tasks.sqlite3")
+QUEUE_FILE = Path.cwd() / "tasks.sqlite3"
 TASK_COUNT = 20
 
 
