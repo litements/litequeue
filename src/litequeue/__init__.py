@@ -247,9 +247,13 @@ class LiteQueue:
                 table_label = "table" if len(unsupported_tables) == 1 else "tables"
                 table_list = ", ".join(unsupported_tables)
                 raise ValueError(
-                    "LiteQueue no longer supports multiple queues or other tables "
-                    f"in one database. Found unsupported {table_label}: {table_list}. "
-                    "Each queue must use its own database."
+                    "LiteQueue versions later than 0.9 require a database with a "
+                    "single `Queue` table. These versions do not allow multiple "
+                    "queues or database sharing with other applications. "
+                    f"Found unsupported {table_label}: {table_list}. "
+                    "See the migration guide: "
+                    "https://github.com/litements/litequeue/blob/main/docs/"
+                    "migrate_single_queue.md"
                 )
 
             table_exists = bool(table_names)

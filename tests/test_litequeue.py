@@ -268,7 +268,13 @@ def test_existing_wal_database_skips_journal_mode_change(
 
 @pytest.mark.parametrize(
     "managed_option",
-    ("autocommit", "cached_statements", "check_same_thread", "database", "isolation_level"),
+    (
+        "autocommit",
+        "cached_statements",
+        "check_same_thread",
+        "database",
+        "isolation_level",
+    ),
 )
 def test_managed_connection_kwargs_are_rejected(
     tmp_path: Path,
@@ -399,9 +405,11 @@ def test_database_with_custom_queue_table_is_rejected_without_changes(
     connection.close()
 
     expected_message = (
-        "LiteQueue no longer supports multiple queues or other tables in one "
-        "database. Found unsupported table: CustomQueue. Each queue must use "
-        "its own database."
+        "LiteQueue versions later than 0.9 require a database with a single "
+        "`Queue` table. These versions do not allow multiple queues or database "
+        "sharing with other applications. Found unsupported table: CustomQueue. "
+        "See the migration guide: https://github.com/litements/litequeue/blob/"
+        "main/docs/migrate_single_queue.md"
     )
     with pytest.raises(ValueError, match=expected_message):
         LiteQueue(name="custom", folder=tmp_path)
@@ -428,11 +436,16 @@ def test_database_with_queue_and_another_table_is_rejected(tmp_path: Path) -> No
     connection.commit()
     connection.close()
 
-    with pytest.raises(
-        ValueError,
-        match="Found unsupported table: ApplicationData",
-    ):
+    with pytest.raises(ValueError) as error:
         LiteQueue(name="shared", folder=tmp_path)
+
+    error_message = str(error.value)
+    assert "single `Queue` table" in error_message
+    assert "database sharing with other applications" in error_message
+    assert "Found unsupported table: ApplicationData" in error_message
+    assert (
+        "https://github.com/litements/litequeue/blob/main/docs/migrate_single_queue.md"
+    ) in error_message
 
     connection = sqlite3.connect(database_path)
     queue_row = connection.execute(
