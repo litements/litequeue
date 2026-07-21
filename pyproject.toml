@@ -27,6 +27,7 @@ dev = [
 
 [tool.uv]
 exclude-newer = "1 week"
+exclude-newer-package = { litequeue = false }
 
 [build-system]
 requires = ["uv_build>=0.11.29,<0.12"]

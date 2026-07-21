@@ -119,8 +119,26 @@ raises `ValueError`.
 
 ## Examples and benchmarks
 
-You can have a look at the `tests/` folder. The tests are short and showcase
-different usage scenarios.
+The [`examples/producer.py`](examples/producer.py) and
+[`examples/consumer.py`](examples/consumer.py) scripts show a producer and a
+consumer that use the same persistent queue.
+
+Run the producer from the repository root:
+
+```sh
+uv run examples/producer.py
+```
+
+Run the consumer in a second terminal:
+
+```sh
+uv run examples/consumer.py
+```
+
+The scripts share `examples/tasks.queue.sqlite3`. The consumer retries failed
+tasks and marks a task as failed after three attempts.
+
+The `tests/` folder contains more usage scenarios.
 
 The `benchmark.py` script contains benchmarks comparing `litequeue` to the
 built-in Python `queue.Queue`. Run it with `make benchmark`.
