@@ -42,8 +42,6 @@ The examples use these names:
 | Source database      | `/srv/app/queues.sqlite3`                  |
 | Backup database      | `/srv/app/queues.pre-single-queue.sqlite3` |
 | Source queue table   | `EmailQueue`                               |
-| New queue name       | `email`                                    |
-| Destination folder   | `/srv/app/new-queues`                      |
 | Destination database | `/srv/app/new-queues/email.queue.sqlite3`  |
 
 Replace every example path and table name with your values.
@@ -67,11 +65,11 @@ Use the application recovery process if you must retry a locked message.
 
 ### 1. Record the queue mapping
 
-Create a mapping from each source table to one new queue name.
-The queue name controls the destination filename.
+Create a mapping from each source table to one destination database path.
+LiteQueue uses the path as supplied and does not add a filename suffix.
 
-For example, the queue name `email` creates `email.queue.sqlite3`.
-Do not put a directory path in the queue name.
+For example, map `EmailQueue` to
+`/srv/app/new-queues/email.queue.sqlite3`.
 
 ### 2. Prepare the destination folder
 
@@ -353,7 +351,7 @@ email_queue = LiteQueue(
 )
 ```
 
-Use the new queue name and destination folder:
+Pass the destination database path:
 
 ```python
 from pathlib import Path
@@ -362,13 +360,12 @@ from litequeue import LiteQueue
 
 
 email_queue = LiteQueue(
-    name="email",
-    folder=Path("/srv/app/new-queues"),
+    filename=Path("/srv/app/new-queues/email.queue.sqlite3"),
 )
 ```
 
 Change each application queue in the same way.
-Do not pass `queue_name` to the new LiteQueue release.
+Do not pass `queue_name`, `name`, or `folder` to the new LiteQueue release.
 
 Omit `maxsize` when you open a migrated queue.
 Alternatively, pass the exact capacity value that you restored in step 9.

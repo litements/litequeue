@@ -5,8 +5,8 @@
 ## Why?
 
 You can use this to implement a persistent queue. It also has extra timing
-metrics for the messages/tasks, and the api to set a message as **done** lets
-you specifiy the `message_id` to be set as done.
+metrics for messages and tasks. The API lets you mark a specific `message_id`
+as **done**.
 
 Since it's all based on SQLite / SQL, it is easily extendable.
 
@@ -32,7 +32,7 @@ Python 3.12 or newer and SQLite 3 are required.
 ```python
 from litequeue import LiteQueue
 
-q = LiteQueue(name="tasks")
+q = LiteQueue(filename="tasks.sqlite3")
 
 q.put("hello")
 q.put("world")
@@ -88,7 +88,7 @@ accept messages.
 
 ## Thread safety
 
-A named `LiteQueue` instance can be shared between threads. It uses one
+A file-backed `LiteQueue` instance can be shared between threads. It uses one
 connection for writes and explicit transactions, plus a fixed pool of ten
 query-only connections for reads. A read checks out one connection for the
 duration of the operation and always returns it afterward. Reads can continue
@@ -109,7 +109,7 @@ write connection and all ten read connections. Common options include
 `timeout`, `detect_types`, `factory`, and `uri`:
 
 ```python
-queue = LiteQueue(name="tasks", timeout=30.0)
+queue = LiteQueue(filename="tasks.sqlite3", timeout=30.0)
 ```
 
 LiteQueue owns `database`, `isolation_level`, `check_same_thread`,
@@ -135,7 +135,7 @@ Run the consumer in a second terminal:
 uv run examples/consumer.py
 ```
 
-The scripts share `examples/tasks.queue.sqlite3`. The consumer retries failed
+The scripts share `examples/tasks.sqlite3`. The consumer retries failed
 tasks and marks a task as failed after three attempts.
 
 The `tests/` folder contains more usage scenarios.
@@ -145,30 +145,34 @@ built-in Python `queue.Queue`. Run it with `make benchmark`.
 
 ## One queue per database
 
-Each LiteQueue queue uses its own SQLite database. Pass `name="email"` to create
-`email.queue.sqlite3`. LiteQueue stores messages in one fixed table named
-`Queue`.
+Each SQLite database file is one LiteQueue queue. Pass the exact file location
+when you create the queue. LiteQueue does not add a suffix or derive the path
+from a separate queue name. It stores messages in one fixed table named `Queue`.
 
 ```python
 from pathlib import Path
 
 import litequeue
 
-queue_folder = Path("/var/lib/myapp/queues")
-email_queue = litequeue.LiteQueue(name="email", folder=queue_folder)
-image_queue = litequeue.LiteQueue(name="images")
+queue_directory = Path("/var/lib/myapp/queues")
+email_database = queue_directory / "email.sqlite3"
+image_database = queue_directory / "images.sqlite3"
+
+email_queue = litequeue.LiteQueue(filename=email_database)
+image_queue = litequeue.LiteQueue(filename=image_database)
 
 email_queue.put("send welcome email")
 image_queue.put("resize profile photo")
 ```
 
-`folder` must be an existing `Path`. When omitted, LiteQueue uses `Path.cwd()`.
+The destination directory must exist. SQLite creates the database file when it
+does not exist. Relative paths use the current working directory.
 
 Databases containing custom queue tables, multiple queue tables, or unrelated
 application tables are not supported. LiteQueue raises `ValueError` before
-changing their schema. The old `queue_name` argument is no longer supported;
-create a separate `.queue.sqlite3` database for each queue instead. LiteQueue
-does not automatically migrate shared or custom-table databases.
+changing their schema. The old `queue_name`, `name`, and `folder` arguments are
+no longer supported. Pass each queue's database file through `filename`.
+LiteQueue does not automatically migrate shared or custom-table databases.
 
 ## Contributing
 

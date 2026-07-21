@@ -153,8 +153,7 @@ def validate_maxsize(maxsize: int | None) -> int | None:
 class LiteQueue:
     def __init__(
         self,
-        name: str,
-        folder: Path | None = None,
+        filename: str | Path,
         maxsize: int | None = None,
         **kwargs: Any,
     ) -> None:
@@ -162,8 +161,7 @@ class LiteQueue:
         Create a new queue.
 
         Args:
-        - name: Queue name. LiteQueue stores it in `<name>.queue.sqlite3`.
-        - folder: Directory for a named queue. Defaults to the current directory.
+        - filename: Location of the SQLite database file. The file is the queue.
         - maxsize: Maximum number of ready messages allowed in the queue. The
           value is stored as an immutable queue setting. When reopening a
           queue, omit it to use the stored setting or pass the same value.
@@ -183,17 +181,12 @@ class LiteQueue:
         serves committed data to other threads.
 
         """
-        if not isinstance(name, str):
-            raise TypeError("name must be a string")
+        filename_is_supported = isinstance(filename, (str, Path))
+        if not filename_is_supported:
+            raise TypeError("filename must be a string or pathlib.Path")
 
-        if name == "":
-            raise ValueError("name must not be empty")
-
-        if Path(name).name != name:
-            raise ValueError("name must not contain a directory path; use folder")
-
-        if folder is not None and not isinstance(folder, Path):
-            raise TypeError("folder must be a pathlib.Path or None")
+        if filename == "":
+            raise ValueError("filename must not be empty")
 
         managed_options = _MANAGED_CONNECTION_OPTIONS.intersection(kwargs)
         if managed_options:
@@ -209,15 +202,11 @@ class LiteQueue:
         self._close_state_lock = threading.Lock()
         self._is_closed = False
 
-        queue_folder = folder if folder is not None else Path.cwd()
-        if not queue_folder.is_dir():
-            raise ValueError("folder must be an existing directory")
-
         self.pop: PopFunction = self._select_pop_func()
 
-        database_filename = queue_folder / f"{name}.queue.sqlite3"
+        database_filename = str(filename)
         self.conn = sqlite3.connect(
-            database=str(database_filename),
+            database=database_filename,
             isolation_level=None,
             check_same_thread=False,
             # Disable cached statements due to a bug in CPython >= 3.12.
@@ -330,7 +319,7 @@ END;"""
         )
         for _ in range(_READ_CONNECTION_POOL_SIZE):
             read_connection = sqlite3.connect(
-                database=str(database_filename),
+                database=database_filename,
                 isolation_level=None,
                 check_same_thread=False,
                 # Disable cached statements due to a bug in CPython >= 3.12.

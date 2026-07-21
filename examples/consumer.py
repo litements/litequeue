@@ -13,7 +13,7 @@ from pathlib import Path
 
 from litequeue import LiteQueue
 
-QUEUE_FOLDER = Path(__file__).parent
+QUEUE_FILE = Path(__file__).with_name("tasks.sqlite3")
 IDLE_TIMEOUT_SECONDS = 3
 MAX_ATTEMPTS = 3
 FAILURE_RATE = 0.2
@@ -32,7 +32,7 @@ def process_task(data: str) -> int:
 
 
 def main() -> None:
-    queue = LiteQueue(name="tasks", folder=QUEUE_FOLDER)
+    queue = LiteQueue(filename=QUEUE_FILE)
     attempts: dict[str, int] = {}
     idle_since = time.monotonic()
 

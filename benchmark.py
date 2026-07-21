@@ -60,9 +60,9 @@ def benchmark_puts(number: int, repeat: int) -> None:
         repeat,
     )
 
-    database_path = Path("test.queue.sqlite3")
+    database_path = Path("test.sqlite3")
     cleanup_database(database_path)
-    persistent_queue = LiteQueue(name="test", maxsize=None)
+    persistent_queue = LiteQueue(filename=database_path, maxsize=None)
     benchmark(
         "LiteQueue put (disk)",
         lambda: persistent_queue.put(random_string(20)),
@@ -84,9 +84,9 @@ def benchmark_completion(number: int, repeat: int) -> None:
 
     benchmark("queue.Queue complete task", complete_standard_task, number, repeat)
 
-    database_path = Path("completion.queue.sqlite3")
+    database_path = Path("completion.sqlite3")
     cleanup_database(database_path)
-    lite_queue = LiteQueue(name="completion", maxsize=None)
+    lite_queue = LiteQueue(filename=database_path, maxsize=None)
 
     def complete_litequeue_task() -> None:
         task_id = random_string(20)
@@ -101,9 +101,9 @@ def benchmark_completion(number: int, repeat: int) -> None:
 
 
 def benchmark_pop_method(label: str, method_name: str, item_count: int) -> None:
-    database_path = Path("pop_bench.queue.sqlite3")
+    database_path = Path("pop_bench.sqlite3")
     cleanup_database(database_path)
-    queue = LiteQueue(name="pop_bench", maxsize=None)
+    queue = LiteQueue(filename=database_path, maxsize=None)
     queue.pop = getattr(queue, method_name)
 
     prefill_count = max(10_000, item_count)

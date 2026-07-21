@@ -32,16 +32,17 @@ def require_message(message: Message | None) -> Message:
 )
 def shared_queue(request, tmp_path: Path) -> LiteQueue:
     """Return a shared queue using one of the supported pop paths."""
-    queue = LiteQueue(name=request.param, folder=tmp_path)
+    database_path = tmp_path / f"{request.param}.sqlite3"
+    queue = LiteQueue(filename=database_path)
     queue.pop = getattr(queue, request.param)
     return queue
 
 
-def test_named_queue_uses_shared_connection_options(
+def test_file_queue_uses_shared_connection_options(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Named queues enable cross-thread use and disable statement caching."""
+    """File queues enable cross-thread use and disable statement caching."""
     connect = sqlite3.connect
     received_options: list[dict[str, object]] = []
 
@@ -51,7 +52,7 @@ def test_named_queue_uses_shared_connection_options(
 
     monkeypatch.setattr(litequeue.sqlite3, "connect", recording_connect)
 
-    queue = LiteQueue(name="queue", folder=tmp_path)
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
     queue.close()
 
     assert len(received_options) == 11
@@ -62,8 +63,8 @@ def test_named_queue_uses_shared_connection_options(
 def test_read_pool_contains_ten_distinct_query_only_connections(
     tmp_path: Path,
 ) -> None:
-    """Named queues provide ten protected read slots separate from writes."""
-    queue = LiteQueue(name="queue", folder=tmp_path)
+    """File queues provide ten protected read slots separate from writes."""
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
 
     with ExitStack() as stack:
         connections = [
@@ -82,7 +83,7 @@ def test_read_pool_contains_ten_distinct_query_only_connections(
 
 def test_read_connection_is_returned_to_pool(tmp_path: Path) -> None:
     """The eleventh reader waits until one of ten checked-out slots returns."""
-    queue = LiteQueue(name="queue", folder=tmp_path)
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
     read_started = threading.Event()
 
     def read_size() -> int:
@@ -102,7 +103,7 @@ def test_read_connection_is_returned_to_pool(tmp_path: Path) -> None:
 
 def test_shared_queue_enforces_maxsize_under_contention(tmp_path: Path) -> None:
     """Concurrent producers on one instance cannot exceed its capacity."""
-    queue = LiteQueue(name="queue", folder=tmp_path, maxsize=8)
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3", maxsize=8)
 
     def put_message(index: int) -> bool:
         result = True
@@ -164,7 +165,7 @@ def test_concurrent_consumers_do_not_duplicate_claims(
 
 def test_transaction_rollback_excludes_concurrent_put(tmp_path: Path) -> None:
     """Another thread cannot join and be reverted by an active transaction."""
-    queue = LiteQueue(name="queue", folder=tmp_path)
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
     transaction_started = threading.Event()
     allow_rollback = threading.Event()
 
@@ -191,7 +192,7 @@ def test_transaction_rollback_excludes_concurrent_put(tmp_path: Path) -> None:
 
 def test_reads_continue_without_observing_uncommitted_writes(tmp_path: Path) -> None:
     """Read connections see committed state while another thread may roll back."""
-    queue = LiteQueue(name="queue", folder=tmp_path)
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
     queue.put("committed")
     transaction_started = threading.Event()
     allow_rollback = threading.Event()
@@ -221,7 +222,7 @@ def test_reads_continue_without_observing_uncommitted_writes(tmp_path: Path) -> 
 
 def test_transaction_owner_reads_its_uncommitted_writes(tmp_path: Path) -> None:
     """Reads in the transaction thread use the write connection."""
-    queue = LiteQueue(name="queue", folder=tmp_path)
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
     message_id = ""
 
     with pytest.raises(RuntimeError, match="roll back"):
@@ -236,7 +237,7 @@ def test_transaction_owner_reads_its_uncommitted_writes(tmp_path: Path) -> None:
 
 def test_concurrent_failure_and_retry_transitions(tmp_path: Path) -> None:
     """Failure and retry operations are safe on one shared connection."""
-    queue = LiteQueue(name="queue", folder=tmp_path)
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
     for index in range(64):
         queue.put(str(index))
     messages = [require_message(queue.pop()) for _ in range(64)]
@@ -258,7 +259,7 @@ def test_concurrent_failure_and_retry_transitions(tmp_path: Path) -> None:
 
 def test_close_waits_for_active_transaction(tmp_path: Path) -> None:
     """Close cannot interrupt a transaction running in another thread."""
-    queue = LiteQueue(name="queue", folder=tmp_path)
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
     transaction_started = threading.Event()
     allow_commit = threading.Event()
     close_started = threading.Event()
@@ -289,7 +290,7 @@ def test_close_waits_for_active_transaction(tmp_path: Path) -> None:
 
 def test_close_waits_for_checked_out_read_connection(tmp_path: Path) -> None:
     """Pool shutdown waits until an active reader returns its connection."""
-    queue = LiteQueue(name="queue", folder=tmp_path)
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
     read_started = threading.Event()
     allow_read_to_finish = threading.Event()
     close_started = threading.Event()

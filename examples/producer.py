@@ -12,12 +12,12 @@ from pathlib import Path
 
 from litequeue import LiteQueue
 
-QUEUE_FOLDER = Path(__file__).parent
+QUEUE_FILE = Path(__file__).with_name("tasks.sqlite3")
 TASK_COUNT = 20
 
 
 def main() -> None:
-    queue = LiteQueue(name="tasks", folder=QUEUE_FOLDER)
+    queue = LiteQueue(filename=QUEUE_FILE)
 
     try:
         for task_number in range(1, TASK_COUNT + 1):
