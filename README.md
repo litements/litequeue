@@ -78,7 +78,36 @@ q.get(task.message_id)
 - Timing metrics. As long as tasks are still in the queue or not pruned, you can see how long they have been there or how long they took to finish.
 - Easy to extend using SQL
 
-## Queue capacity
+## Queue size and capacity
+
+`qsize()`, `empty()`, `full()`, and `maxsize` all use the ready backlog: messages
+that are waiting to be claimed. A message stops contributing to that backlog as
+soon as `pop()` locks it for a worker.
+
+Use the explicit count methods when you need a different view:
+
+- `ready_count()` counts messages waiting to be claimed.
+- `locked_count()` counts messages currently claimed by workers.
+- `done_count()` counts completed messages that have not been pruned.
+- `failed_count()` counts failed messages that have not been pruned.
+- `active_count()` counts ready plus locked messages.
+- `stored_count()` counts every stored row regardless of status.
+
+For example, active locked work does not make the ready backlog non-empty:
+
+```python
+queue = LiteQueue(filename="tasks.sqlite3", maxsize=1)
+queue.put("resize image")
+task = queue.pop()
+
+assert task is not None
+assert queue.qsize() == 0
+assert queue.empty()
+assert not queue.full()
+assert queue.locked_count() == 1
+assert queue.active_count() == 1
+assert queue.stored_count() == 1
+```
 
 `maxsize` limits the number of ready messages and is stored as an immutable
 property of the queue. Omit `maxsize` when reopening a queue to use its stored
@@ -194,6 +223,10 @@ distributions, and uploads them with uv.
 
 ## Important changes
 
+- After version 0.12:
+  - `qsize()` now reports only the ready backlog instead of ready plus locked work.
+  - `empty()`, `full()`, and `maxsize` use the same ready-backlog definition.
+  - Explicit ready, locked, done, failed, active, and stored count methods are available.
 - In version 0.10:
   - Each SQLite database can contain only one LiteQueue queue.
   - You must migrate version 0.9 queues before you use version 0.10 or later.
