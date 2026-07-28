@@ -179,7 +179,6 @@ class LiteQueue:
         compiled in serialized mode, as in standard CPython builds. LiteQueue
         serializes writes and explicit transactions while a read-only pool
         serves committed data to other threads.
-
         """
         filename_is_supported = isinstance(filename, (str, Path))
         if not filename_is_supported:
@@ -214,9 +213,7 @@ class LiteQueue:
             cached_statements=0,
             **kwargs,
         )
-
         self.conn.row_factory = sqlite3.Row
-
         self.table = f'"{_QUEUE_TABLE_NAME}"'
 
         with self.transaction(mode="IMMEDIATE"):
@@ -266,7 +263,6 @@ class LiteQueue:
                 f'CREATE UNIQUE INDEX IF NOT EXISTS "Queue_message_id_unique_idx" '
                 f"ON {self.table}(message_id)"
             )
-
             self.conn.execute(
                 f'CREATE INDEX IF NOT EXISTS "Queue_status_message_id_idx" '
                 f"ON {self.table}(status, message_id)"
@@ -282,7 +278,6 @@ class LiteQueue:
                         f"maxsize {validated_maxsize} conflicts with stored maxsize "
                         f"{stored_maxsize} for queue '{_QUEUE_TABLE_NAME}'"
                     )
-
                 effective_maxsize = stored_maxsize
             else:
                 effective_maxsize = validated_maxsize
@@ -382,10 +377,7 @@ END;"""
         return self._pop_transaction
 
     def put(self, data: str) -> Message:
-        """
-        Insert a new message
-        """
-        # timeout: int = None
+        """Insert a new message."""
         message_id = str(uuid7())
         now = time_ns()
 
@@ -498,7 +490,7 @@ END;"""
             read_connections.put(read_connection)
 
     def peek(self) -> Message | None:
-        "Show next message to be popped, if any."
+        """Show next message to be popped, if any."""
 
         with self._read_connection() as connection:
             value = connection.execute(
@@ -508,7 +500,7 @@ END;"""
         return _message_from_row(value) if value is not None else None
 
     def get(self, message_id: str) -> Message | None:
-        "Get a message by its `message_id`"
+        """Get a message by its `message_id`."""
 
         with self._read_connection() as connection:
             value = connection.execute(
@@ -576,7 +568,7 @@ END;"""
                 SELECT * FROM {self.table}
                 WHERE
                   status = {MessageStatus.LOCKED.value}
-                  AND  lock_time < :time_value
+                  AND lock_time < :time_value
                 """.strip(),
                 {"time_value": time_ns() - threshold_nanoseconds},
             ).fetchall()
@@ -585,16 +577,13 @@ END;"""
             yield _message_from_row(result)
 
     def list_failed(self) -> Iterator[Message]:
-        """
-        Return all the tasks in `FAILED` state.
-        """
+        """Return all the tasks in `FAILED` state."""
 
         with self._read_connection() as connection:
             rows = connection.execute(
                 f"""
                 SELECT * FROM {self.table}
-                WHERE
-                  status = {MessageStatus.FAILED.value}
+                WHERE status = {MessageStatus.FAILED.value}
                 """.strip()
             ).fetchall()
 
@@ -603,7 +592,7 @@ END;"""
 
     def retry(self, message_id: str) -> bool:
         """
-        Mark a locked message as free again.
+        Mark a locked or failed message as ready again.
 
         Return `True` when the message exists, otherwise `False`.
         """
@@ -621,52 +610,58 @@ END;"""
 
         return cursor.rowcount > 0
 
-    def qsize(self) -> int:
-        """
-        Get current size of the queue.
-        """
+    def _count_statuses(self, *statuses: MessageStatus) -> int:
+        """Return the number of stored messages in the requested states."""
+        if not statuses:
+            return self.stored_count()
 
+        placeholders = ", ".join("?" for _ in statuses)
         with self._read_connection() as connection:
-            cursor = connection.execute(
-                f"""
-            SELECT COUNT(*) FROM {self.table}
-            WHERE status NOT IN ({MessageStatus.DONE.value}, {MessageStatus.FAILED.value})
-            """.strip()
-            )
-            size = next(cursor)[0]
+            value = connection.execute(
+                f"SELECT COUNT(*) FROM {self.table} WHERE status IN ({placeholders})",
+                tuple(status.value for status in statuses),
+            ).fetchone()
+        return int(value[0])
 
-        return size
+    def ready_count(self) -> int:
+        """Return the number of messages waiting to be claimed."""
+        return self._count_statuses(MessageStatus.READY)
+
+    def locked_count(self) -> int:
+        """Return the number of messages currently claimed by workers."""
+        return self._count_statuses(MessageStatus.LOCKED)
+
+    def done_count(self) -> int:
+        """Return the number of completed messages still stored."""
+        return self._count_statuses(MessageStatus.DONE)
+
+    def failed_count(self) -> int:
+        """Return the number of failed messages still stored."""
+        return self._count_statuses(MessageStatus.FAILED)
+
+    def active_count(self) -> int:
+        """Return the number of ready and locked messages."""
+        return self._count_statuses(MessageStatus.READY, MessageStatus.LOCKED)
+
+    def stored_count(self) -> int:
+        """Return the total number of rows stored for every message state."""
+        with self._read_connection() as connection:
+            value = connection.execute(f"SELECT COUNT(*) FROM {self.table}").fetchone()
+        return int(value[0])
+
+    def qsize(self) -> int:
+        """Return the ready backlog size."""
+        return self.ready_count()
 
     def empty(self) -> bool:
-        """
-        Return True if the queue is empty.
-        """
-
-        with self._read_connection() as connection:
-            value = connection.execute(
-                f"SELECT COUNT(*) as cnt FROM {self.table} WHERE status = {MessageStatus.READY.value}"
-            ).fetchone()
-        return not bool(value["cnt"])
+        """Return True when the ready backlog is empty."""
+        return self.qsize() == 0
 
     def full(self) -> bool:
-        """
-        Return True if the queue is full.
-        """
-
-        # Here I need to check compared to the maxsize value
-        # If maxsize is not set, the queue can grow forever
+        """Return True when the ready backlog has reached `maxsize`."""
         if self.maxsize is None:
             return False
-
-        with self._read_connection() as connection:
-            value = connection.execute(
-                f"SELECT COUNT(*) as cnt FROM {self.table} WHERE status = {MessageStatus.READY.value}"
-            ).fetchone()
-
-        if value["cnt"] >= self.maxsize:
-            return True
-        else:
-            return False
+        return self.qsize() >= self.maxsize
 
     def prune(self, include_failed: bool = True) -> None:
         """
