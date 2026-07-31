@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "litequeue>=0.12",
+#   "litequeue>=0.13",
 # ]
 # ///
 
@@ -22,7 +22,10 @@ def main() -> None:
     try:
         for task_number in range(1, TASK_COUNT + 1):
             payload = json.dumps({"task_number": task_number})
-            message = queue.put(payload)
+            message = queue.put(
+                payload,
+                idempotency_key=f"task:{task_number}",
+            )
             print(f"Produced task {task_number}: {message.message_id}")
             time.sleep(1)
     finally:

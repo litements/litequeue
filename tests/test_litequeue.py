@@ -16,6 +16,51 @@ print(sqlite3.sqlite_version)
 # https://docs.pytest.org/en/7.1.x/how-to/fixtures.html#parametrizing-fixtures
 
 
+def test_message_legacy_constructor_uses_safe_field_defaults() -> None:
+    """Existing six-field Message construction gets safe new-field defaults."""
+    message = Message(
+        data="work",
+        message_id="message-id",
+        status=MessageStatus.READY,
+        in_time=1.0,
+        lock_time=None,
+        done_time=None,
+    )
+
+    assert message.idempotency_key is None
+    assert message.claim_id == 0
+
+
+def test_message_timestamps_use_unix_seconds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Message timestamps and duration calculations use seconds."""
+    current_time = [1_700_000_000.25]
+    monkeypatch.setattr(litequeue, "time_seconds", lambda: current_time[0])
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
+
+    inserted = queue.put("work")
+    current_time[0] += 1.5
+    claimed = queue.pop()
+
+    assert claimed is not None
+
+    current_time[0] += 2.25
+    assert queue.done(
+        message_id=claimed.message_id,
+        claim_id=claimed.claim_id,
+    )
+
+    completed = queue.get(claimed.message_id)
+
+    assert completed is not None
+    assert inserted.in_time == 1_700_000_000.25
+    assert completed.in_time == inserted.in_time
+    assert completed.lock_time == inserted.in_time + 1.5
+    assert completed.done_time == inserted.in_time + 3.75
+
+
 def test_uuid7_matches_rfc_9562_test_vector(monkeypatch) -> None:
     timestamp_ns = 1_645_557_742_000_000_000
     counter = (0xCC3 << 30) | 0x18C4DC0C
@@ -348,6 +393,10 @@ def test_database_paths_identify_queues(tmp_path: Path) -> None:
 
         assert [row["name"] for row in table_rows] == ["Queue"]
         assert get_queue_indexes(reopened_queue, "Queue") == {
+            "Queue_idempotency_key_unique_idx": (
+                True,
+                ["idempotency_key"],
+            ),
             "Queue_message_id_unique_idx": (True, ["message_id"]),
             "Queue_status_message_id_idx": (False, ["status", "message_id"]),
         }
@@ -385,18 +434,38 @@ def test_queue_creates_fixed_schema(tmp_path: Path) -> None:
         'SELECT "sql" FROM "sqlite_master" WHERE "type" = :type AND "name" = :name',
         {"type": "trigger", "name": "maxsize_control_Queue"},
     ).fetchone()
+    column_rows = q.conn.execute('PRAGMA table_info("Queue")').fetchall()
 
     index_sql = [index[0] for index in indexes]
+    columns = {
+        row["name"]: (row["type"], bool(row["notnull"]), row["dflt_value"])
+        for row in column_rows
+    }
 
     assert table is not None
     assert 'CREATE TABLE "Queue"' in table[0]
+    assert columns == {
+        "data": ("TEXT", True, None),
+        "message_id": ("TEXT", True, None),
+        "status": ("INTEGER", True, None),
+        "in_time": ("INTEGER", True, None),
+        "lock_time": ("INTEGER", False, None),
+        "done_time": ("INTEGER", False, None),
+        "idempotency_key": ("TEXT", False, None),
+        "claim_id": ("INTEGER", True, "0"),
+    }
     assert index_sql == [
+        (
+            'CREATE UNIQUE INDEX "Queue_idempotency_key_unique_idx" '
+            'ON "Queue"(idempotency_key) WHERE idempotency_key IS NOT NULL'
+        ),
         'CREATE UNIQUE INDEX "Queue_message_id_unique_idx" ON "Queue"(message_id)',
         'CREATE INDEX "Queue_status_message_id_idx" ON "Queue"(status, message_id)',
     ]
     assert trigger is not None
     assert 'CREATE TRIGGER "maxsize_control_Queue"' in trigger[0]
     assert 'ON "Queue"' in trigger[0]
+    assert q.conn.execute("PRAGMA user_version").fetchone()[0] == 2
 
     message = q.put("hello")
     assert q.get(message.message_id) is not None
@@ -527,7 +596,7 @@ def test_basic_actions(queue_with_data):
     assert q.peek().data == "world"
     assert q.peek().status == MessageStatus.READY
 
-    q.done(task.message_id)
+    q.done(message_id=task.message_id, claim_id=task.claim_id)
 
     already_done = q.get(task.message_id)
     assert already_done.status == MessageStatus.DONE
@@ -549,8 +618,8 @@ def test_queue_size(queue_with_data):
     task = q.pop()
     q.put("x")
     q.put("y")
-    assert q.qsize() == 6
-    q.done(task.message_id)
+    assert q.qsize() == 5
+    q.done(message_id=task.message_id, claim_id=task.claim_id)
     assert q.qsize() == 5
 
 
@@ -558,7 +627,7 @@ def test_prune(queue_with_data):
     q = queue_with_data
     while not q.empty():
         t = q.pop()
-        q.done(t.message_id)
+        q.done(message_id=t.message_id, claim_id=t.claim_id)
     q.prune()
 
     assert (
@@ -712,7 +781,7 @@ def test_list_locked(single_queue):
     assert len(list(q.list_locked(threshold_seconds=0.1))) == 1
     assert len(list(q.list_locked(threshold_seconds=20))) == 0
 
-    q.done(task.message_id)
+    q.done(message_id=task.message_id, claim_id=task.claim_id)
 
     assert len(list(q.list_locked(threshold_seconds=0.1))) == 0
 
@@ -723,40 +792,53 @@ def test_retry_failed(single_queue):
 
     task = q.pop()
 
-    q.mark_failed(task.message_id)
+    q.mark_failed(message_id=task.message_id, claim_id=task.claim_id)
 
     assert q.get(task.message_id).status == MessageStatus.FAILED
 
-    q.retry(task.message_id)
+    q.retry(message_id=task.message_id, claim_id=task.claim_id)
 
     assert q.get(task.message_id).status == MessageStatus.READY
     assert q.get(task.message_id).done_time is None
     assert q.qsize() == 1
 
 
-def test_done_returns_whether_message_exists(single_queue: LiteQueue) -> None:
+def test_done_accepts_a_current_claim_and_rejects_a_missing_message(
+    single_queue: LiteQueue,
+) -> None:
     q = single_queue
-    task = q.put("foo")
+    q.put("foo")
+    task = q.pop()
 
-    assert q.done(task.message_id) is True
-    assert q.done("missing-message") is False
+    assert task is not None
+    assert q.done(message_id=task.message_id, claim_id=task.claim_id) is True
+    assert q.done(message_id="missing-message", claim_id=task.claim_id) is False
 
 
-def test_mark_failed_returns_whether_message_exists(single_queue: LiteQueue) -> None:
+def test_mark_failed_accepts_a_current_claim_and_rejects_a_missing_message(
+    single_queue: LiteQueue,
+) -> None:
     q = single_queue
-    task = q.put("foo")
+    q.put("foo")
+    task = q.pop()
 
-    assert q.mark_failed(task.message_id) is True
-    assert q.mark_failed("missing-message") is False
+    assert task is not None
+    assert q.mark_failed(message_id=task.message_id, claim_id=task.claim_id) is True
+    assert q.mark_failed(message_id="missing-message", claim_id=task.claim_id) is False
 
 
-def test_retry_returns_whether_message_exists(single_queue: LiteQueue) -> None:
+def test_retry_accepts_a_current_claim_and_rejects_a_missing_message(
+    single_queue: LiteQueue,
+) -> None:
     q = single_queue
-    task = q.put("foo")
-    q.mark_failed(task.message_id)
+    q.put("foo")
+    task = q.pop()
 
-    assert q.retry(task.message_id) is True
-    assert q.retry("missing-message") is False
+    assert task is not None
+    q.mark_failed(message_id=task.message_id, claim_id=task.claim_id)
+
+    assert q.retry(message_id=task.message_id, claim_id=task.claim_id) is True
+    assert q.retry(message_id="missing-message", claim_id=task.claim_id) is False
 
 
 def test_count_failed(single_queue):
@@ -764,7 +846,7 @@ def test_count_failed(single_queue):
 
     q.put("foot")
     task = q.pop()
-    q.mark_failed(task.message_id)
+    q.mark_failed(message_id=task.message_id, claim_id=task.claim_id)
 
     assert len(list(q.list_failed())) == 1
 
@@ -793,6 +875,10 @@ def test_queue_gets_fixed_indexes(tmp_path: Path) -> None:
     queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
 
     assert get_queue_indexes(queue, "Queue") == {
+        "Queue_idempotency_key_unique_idx": (
+            True,
+            ["idempotency_key"],
+        ),
         "Queue_message_id_unique_idx": (True, ["message_id"]),
         "Queue_status_message_id_idx": (False, ["status", "message_id"]),
     }
@@ -815,7 +901,7 @@ def test_duplicate_message_ids_are_rejected_by_sqlite(tmp_path: Path) -> None:
                 "data": "duplicate",
                 "message_id": message.message_id,
                 "status": MessageStatus.READY.value,
-                "in_time": time.time_ns(),
+                "in_time": time.time(),
             },
         )
 
@@ -853,7 +939,7 @@ def test_fifo_queries_use_composite_index_without_temporary_sort(
     queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
     plan_rows = queue.conn.execute(
         f"EXPLAIN QUERY PLAN {statement}",
-        {"now": time.time_ns()},
+        {"now": time.time()},
     ).fetchall()
     plan = "\n".join(row["detail"] for row in plan_rows)
 
@@ -869,7 +955,10 @@ def test_all_message_read_paths_return_typed_status(single_queue) -> None:
     ready_message = q.put("ready")
     locked_message = q.pop()
     message_to_fail = q.pop()
-    q.mark_failed(message_to_fail.message_id)
+    q.mark_failed(
+        message_id=message_to_fail.message_id,
+        claim_id=message_to_fail.claim_id,
+    )
 
     messages = [
         ready_message,

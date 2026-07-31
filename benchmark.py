@@ -93,7 +93,10 @@ def benchmark_completion(number: int, repeat: int) -> None:
         lite_queue.put(task_id)
         task = lite_queue.pop()
         assert task is not None
-        lite_queue.done(task.message_id)
+        lite_queue.done(
+            message_id=task.message_id,
+            claim_id=task.claim_id,
+        )
 
     benchmark("LiteQueue complete task", complete_litequeue_task, number, repeat)
     lite_queue.close()

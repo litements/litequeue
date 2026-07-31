@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "litequeue>=0.12",
+#   "litequeue>=0.13",
 # ]
 # ///
 
@@ -45,6 +45,7 @@ def main() -> None:
 
             idle_since = time.monotonic()
             message_id = message.message_id
+            claim_id = message.claim_id
             attempt = attempts.get(message_id, 0) + 1
             attempts[message_id] = attempt
 
@@ -52,17 +53,44 @@ def main() -> None:
                 task_number = process_task(message.data)
             except Exception as error:
                 if attempt < MAX_ATTEMPTS:
-                    queue.retry(message_id)
-                    print(f"Retrying {message_id} after attempt {attempt}: {error}")
+                    updated = queue.retry(
+                        message_id=message_id,
+                        claim_id=claim_id,
+                    )
+                    if not updated:
+                        print(f"Lost claim {claim_id} for {message_id}")
+                        continue
+
+                    print(
+                        f"Retrying {message_id} after attempt {attempt} "
+                        f"(claim {claim_id}): {error}"
+                    )
                     continue
 
-                queue.mark_failed(message_id)
-                print(f"Failed {message_id} after {attempt} attempts: {error}")
+                updated = queue.mark_failed(
+                    message_id=message_id,
+                    claim_id=claim_id,
+                )
+                if not updated:
+                    print(f"Lost claim {claim_id} for {message_id}")
+                    continue
+
+                attempts.pop(message_id, None)
+                print(
+                    f"Failed {message_id} after {attempt} attempts "
+                    f"(claim {claim_id}): {error}"
+                )
                 continue
 
-            queue.done(message_id)
+            updated = queue.done(message_id=message_id, claim_id=claim_id)
+            if not updated:
+                print(f"Lost claim {claim_id} for {message_id}")
+                continue
+
             attempts.pop(message_id, None)
-            print(f"Completed task {task_number} on attempt {attempt}")
+            print(
+                f"Completed task {task_number} on attempt {attempt} (claim {claim_id})"
+            )
     finally:
         queue.close()
 

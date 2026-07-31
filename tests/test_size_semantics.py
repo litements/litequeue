@@ -33,8 +33,8 @@ def test_counts_cover_every_message_status(tmp_path: Path) -> None:
     assert locked is not None
     assert done is not None
     assert failed is not None
-    queue.done(done.message_id)
-    queue.mark_failed(failed.message_id)
+    queue.done(message_id=done.message_id, claim_id=done.claim_id)
+    queue.mark_failed(message_id=failed.message_id, claim_id=failed.claim_id)
 
     assert queue.ready_count() == 1
     assert queue.locked_count() == 1

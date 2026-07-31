@@ -133,9 +133,15 @@ def test_shared_queue_supports_concurrent_lifecycle_operations(
         inserted = list(executor.map(queue.put, map(str, range(message_count))))
         pop_results = executor.map(lambda _: queue.pop(), range(message_count))
         popped = [require_message(message) for message in pop_results]
-        completed = list(
-            executor.map(queue.done, [message.message_id for message in popped])
-        )
+
+        def complete(message: Message) -> bool:
+            """Complete one current message claim."""
+            return queue.done(
+                message_id=message.message_id,
+                claim_id=message.claim_id,
+            )
+
+        completed = list(executor.map(complete, popped))
 
     inserted_ids = {message.message_id for message in inserted}
     popped_ids = {message.message_id for message in popped}
@@ -241,17 +247,33 @@ def test_concurrent_failure_and_retry_transitions(tmp_path: Path) -> None:
     for index in range(64):
         queue.put(str(index))
     messages = [require_message(queue.pop()) for _ in range(64)]
-    message_ids = [message.message_id for message in messages]
+
+    def fail(message: Message) -> bool:
+        """Fail one current message claim."""
+        return queue.mark_failed(
+            message_id=message.message_id,
+            claim_id=message.claim_id,
+        )
+
+    def retry(message: Message) -> bool:
+        """Retry one locked or failed message claim."""
+        return queue.retry(
+            message_id=message.message_id,
+            claim_id=message.claim_id,
+        )
 
     with ThreadPoolExecutor(max_workers=16) as executor:
-        failed = list(executor.map(queue.mark_failed, message_ids))
-        retried = list(executor.map(queue.retry, message_ids))
+        failed_futures = [executor.submit(fail, message) for message in messages]
+        failed = [future.result(timeout=10) for future in failed_futures]
+
+        retry_futures = [executor.submit(retry, message) for message in messages]
+        retried = [future.result(timeout=10) for future in retry_futures]
 
     assert failed == [True] * 64
     assert retried == [True] * 64
     assert queue.qsize() == 64
     stored_messages = [
-        require_message(queue.get(message_id)) for message_id in message_ids
+        require_message(queue.get(message.message_id)) for message in messages
     ]
     statuses = [message.status for message in stored_messages]
     assert all(status is MessageStatus.READY for status in statuses)

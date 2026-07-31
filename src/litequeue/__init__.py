@@ -1,3 +1,11 @@
+"""Persistent SQLite queue with retry-safe submission and delivery fencing.
+
+LiteQueue owns one fixed ``Queue`` table per database file. Durable writes are
+serialized by SQLite. Idempotency keys are unique within that file, and each
+delivery transition must match the message's current integer claim ID.
+"""
+
+import math
 import os
 import pprint
 import re
@@ -5,6 +13,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Generator
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,9 +24,11 @@ from queue import Queue
 from typing import Any
 from uuid import UUID
 
-# Expose function used by uuid7() to get current time in nanoseconds
-# since the Unix epoch.
-time_ns = time.time_ns
+from litequeue.migrations import MIGRATIONS
+from litequeue.migrations import apply_migrations
+
+# Expose the clock used for persisted message timestamps.
+time_seconds = time.time
 
 # Copied from CPython's Lib/uuid.py.
 _RFC_4122_VERSION_7_FLAGS = (7 << 76) | (0x8000 << 48)
@@ -54,6 +65,7 @@ def uuid7() -> UUID:
     global _last_timestamp_v7
     global _last_counter_v7
 
+    # UUIDv7 needs millisecond precision. Queue metrics use time_seconds().
     nanoseconds = time.time_ns()
     timestamp_ms = nanoseconds // 1_000_000
 
@@ -94,14 +106,34 @@ class MessageStatus(int, Enum):
     FAILED = 3
 
 
+class IdempotencyConflict(ValueError):
+    """An idempotency key refers to a stored message with different data."""
+
+    def __init__(self, idempotency_key: str) -> None:
+        """Create an error for one conflicting idempotency key."""
+        self.idempotency_key = idempotency_key
+        message = (
+            f"Idempotency key {idempotency_key!r} already exists with different data"
+        )
+        super().__init__(message)
+
+
 @dataclass(frozen=True, slots=True)
 class Message:
+    """A persistent queue message and its current delivery state.
+
+    A ready message has claim ID 0 until its first delivery. Each later
+    delivery increments the claim ID for that message.
+    """
+
     data: str
     message_id: str  # UUID v7
     status: MessageStatus
-    in_time: int
-    lock_time: int | None
-    done_time: int | None
+    in_time: float
+    lock_time: float | None
+    done_time: float | None
+    idempotency_key: str | None = None
+    claim_id: int = 0
 
 
 def _message_from_row(row: sqlite3.Row) -> Message:
@@ -120,6 +152,8 @@ def _message_from_row(row: sqlite3.Row) -> Message:
         in_time=row["in_time"],
         lock_time=row["lock_time"],
         done_time=row["done_time"],
+        idempotency_key=row["idempotency_key"],
+        claim_id=row["claim_id"],
     )
 
 
@@ -127,6 +161,7 @@ type PopFunction = Callable[[], Message | None]
 
 _QUEUE_TABLE_NAME = "Queue"
 _READ_CONNECTION_POOL_SIZE = 10
+_SQLITE_MAX_INTEGER = 2**63 - 1
 _MANAGED_CONNECTION_OPTIONS = {
     "autocommit",
     "cached_statements",
@@ -134,6 +169,59 @@ _MANAGED_CONNECTION_OPTIONS = {
     "database",
     "isolation_level",
 }
+
+
+def _validate_claim_id(claim_id: int) -> int:
+    """Validate a claim ID before SQLite uses it in a transition."""
+    claim_id_is_integer = isinstance(claim_id, int)
+    claim_id_is_boolean = isinstance(claim_id, bool)
+    if not claim_id_is_integer or claim_id_is_boolean:
+        raise TypeError("claim_id must be an integer")
+
+    claim_id_is_in_range = 1 <= claim_id <= _SQLITE_MAX_INTEGER
+    if not claim_id_is_in_range:
+        raise ValueError("claim_id must be between 1 and 9223372036854775807")
+
+    return claim_id
+
+
+def _validate_idempotency_key(idempotency_key: str | None) -> str | None:
+    """Validate an optional producer idempotency key."""
+    if idempotency_key is None:
+        return None
+
+    if not isinstance(idempotency_key, str):
+        raise TypeError("idempotency_key must be a string or None")
+
+    return idempotency_key
+
+
+def _validate_message_data(data: str) -> str:
+    """Validate message data before SQLite stores it."""
+    if not isinstance(data, str):
+        raise TypeError("data must be a string")
+
+    return data
+
+
+def _validate_threshold_seconds(threshold_seconds: int | float) -> float:
+    """Validate a duration and return its value in seconds."""
+    threshold_is_number = isinstance(threshold_seconds, (int, float))
+    threshold_is_boolean = isinstance(threshold_seconds, bool)
+    if not threshold_is_number or threshold_is_boolean:
+        raise TypeError("threshold_seconds must be a number")
+
+    try:
+        validated_threshold_seconds = float(threshold_seconds)
+    except OverflowError as error:
+        raise ValueError("threshold_seconds is too large") from error
+
+    threshold_is_finite = math.isfinite(validated_threshold_seconds)
+    threshold_is_zero_or_positive = validated_threshold_seconds >= 0
+    if not threshold_is_finite or not threshold_is_zero_or_positive:
+        raise ValueError("threshold_seconds must be finite and zero or positive")
+
+    return validated_threshold_seconds
 
 
 def validate_maxsize(maxsize: int | None) -> int | None:
@@ -244,30 +332,9 @@ class LiteQueue:
 
             table_exists = bool(table_names)
 
-            # int == bool in SQLite
-            # will have rowid as primary key by default
-            self.conn.execute(
-                f"""CREATE TABLE IF NOT EXISTS {self.table}
-                (
-                  data       TEXT NOT NULL
-                  , message_id TEXT NOT NULL
-                  , status     INTEGER NOT NULL
-                  , in_time    INTEGER NOT NULL
-                  , lock_time  INTEGER
-                  , done_time  INTEGER
-                )
-                """
-            )
+        apply_migrations(self.conn, MIGRATIONS)
 
-            self.conn.execute(
-                f'CREATE UNIQUE INDEX IF NOT EXISTS "Queue_message_id_unique_idx" '
-                f"ON {self.table}(message_id)"
-            )
-            self.conn.execute(
-                f'CREATE INDEX IF NOT EXISTS "Queue_status_message_id_idx" '
-                f"ON {self.table}(status, message_id)"
-            )
-
+        with self.transaction(mode="IMMEDIATE"):
             stored_maxsize = self._get_stored_maxsize()
             if table_exists:
                 maxsize_conflicts = validated_maxsize is not None and (
@@ -376,20 +443,79 @@ END;"""
 
         return self._pop_transaction
 
-    def put(self, data: str) -> Message:
-        """Insert a new message."""
+    def put(
+        self,
+        data: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Message:
+        """Insert a message or return the current message for a replay.
+
+        Args:
+        - data: Message data as a string.
+        - idempotency_key: Optional caller identity for one logical submission.
+
+        A replay must use the same key and data. A replay returns the stored
+        message with its current status, timestamps, and claim ID.
+
+        Raises:
+        - IdempotencyConflict: The key exists with different data.
+        - TypeError: The data or key has an unsupported type.
+        """
+        validated_data = _validate_message_data(data)
+        validated_key = _validate_idempotency_key(idempotency_key)
+        if validated_key is None:
+            return self._insert_message(
+                data=validated_data,
+                idempotency_key=None,
+            )
+
+        with self._immediate_transaction_if_needed():
+            existing_row = self.conn.execute(
+                f"""
+                SELECT *
+                FROM {self.table}
+                WHERE idempotency_key = :idempotency_key
+                """.strip(),
+                {"idempotency_key": validated_key},
+            ).fetchone()
+
+            if existing_row is None:
+                return self._insert_message(
+                    data=validated_data,
+                    idempotency_key=validated_key,
+                )
+
+            existing_message = _message_from_row(existing_row)
+            if existing_message.data != validated_data:
+                raise IdempotencyConflict(idempotency_key=validated_key)
+
+            return existing_message
+
+    def _insert_message(
+        self,
+        *,
+        data: str,
+        idempotency_key: str | None,
+    ) -> Message:
+        """Insert one message in the active transaction or in autocommit mode."""
         message_id = str(uuid7())
-        now = time_ns()
+        now = time_seconds()
 
         with self._write_connection_lock:
             self.conn.execute(
                 f"""
                 INSERT INTO
                   {self.table}
-                       (  data,  message_id, status,                      in_time, lock_time, done_time )
-                VALUES ( :data, :message_id, {MessageStatus.READY.value}, :now   , NULL     , NULL      )
+                       (  data,  message_id,  idempotency_key, status,                      in_time, lock_time, done_time )
+                VALUES ( :data, :message_id, :idempotency_key, {MessageStatus.READY.value}, :now   , NULL     , NULL      )
                 """.strip(),
-                {"data": data, "message_id": message_id, "now": now},
+                {
+                    "data": data,
+                    "message_id": message_id,
+                    "idempotency_key": idempotency_key,
+                    "now": now,
+                },
             )
 
         return Message(
@@ -399,14 +525,19 @@ END;"""
             in_time=now,
             lock_time=None,
             done_time=None,
+            idempotency_key=idempotency_key,
+            claim_id=0,
         )
 
     def _pop_returning(self) -> Message | None:
+        """Atomically claim the oldest ready message and increment its claim ID."""
         with self.transaction(mode="IMMEDIATE"):
             message = self.conn.execute(
                 f"""
                  UPDATE {self.table}
-                 SET status = {MessageStatus.LOCKED.value}, lock_time = :now
+                 SET status = {MessageStatus.LOCKED.value},
+                     lock_time = :now,
+                     claim_id = claim_id + 1
                  WHERE rowid = (SELECT rowid
                                 FROM {self.table}
                                 WHERE status = {MessageStatus.READY.value}
@@ -414,7 +545,7 @@ END;"""
                                 LIMIT 1)
                  RETURNING *
                  """,
-                {"now": time_ns()},
+                {"now": time_seconds()},
             ).fetchone()
 
             if not message:
@@ -437,12 +568,13 @@ END;"""
             if message is None:
                 return None
 
-            lock_time = time_ns()
+            lock_time = time_seconds()
             self.conn.execute(
                 f"""
                 UPDATE {self.table} SET
                   status = {MessageStatus.LOCKED.value}
                   , lock_time = :lock_time
+                  , claim_id = claim_id + 1
                 WHERE message_id = :message_id
                   AND status = {MessageStatus.READY.value}
                 """.strip(),
@@ -457,10 +589,11 @@ END;"""
                 selected_message,
                 status=MessageStatus.LOCKED,
                 lock_time=lock_time,
+                claim_id=selected_message.claim_id + 1,
             )
 
     @contextmanager
-    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+    def _read_connection(self) -> Generator[sqlite3.Connection]:
         """Check out a read connection with correct transaction visibility."""
         current_thread = threading.get_ident()
         transaction_is_owned = self._transaction_owner == current_thread
@@ -510,16 +643,15 @@ END;"""
 
         return _message_from_row(value) if value is not None else None
 
-    def done(self, message_id: str) -> bool:
-        """
-        Mark message as done.
-        If executed multiple times, `done_time` will be
-        the last time this function is called.
+    def done(self, message_id: str, *, claim_id: int) -> bool:
+        """Mark the current message claim as done.
 
-        Return `True` when the message exists, otherwise `False`.
+        Return `True` when the message is locked with the specified claim ID.
+        Return `False` for a missing message, stale claim, or invalid state.
         """
 
-        now = time_ns()
+        validated_claim_id = _validate_claim_id(claim_id)
+        now = time_seconds()
 
         with self._write_connection_lock:
             cursor = self.conn.execute(
@@ -528,18 +660,26 @@ END;"""
                   status = {MessageStatus.DONE.value}
                   , done_time = :now
                 WHERE message_id = :message_id
+                  AND status = {MessageStatus.LOCKED.value}
+                  AND claim_id = :claim_id
                 """.strip(),
-                {"now": now, "message_id": message_id},
+                {
+                    "now": now,
+                    "message_id": message_id,
+                    "claim_id": validated_claim_id,
+                },
             )
 
         return cursor.rowcount > 0
 
-    def mark_failed(self, message_id: str) -> bool:
-        """
-        Mark a message as failed.
+    def mark_failed(self, message_id: str, *, claim_id: int) -> bool:
+        """Mark the current message claim as failed.
 
-        Return `True` when the message exists, otherwise `False`.
+        Return `True` when the message is locked with the specified claim ID.
+        Return `False` for a missing message, stale claim, or invalid state.
         """
+
+        validated_claim_id = _validate_claim_id(claim_id)
 
         with self._write_connection_lock:
             cursor = self.conn.execute(
@@ -548,19 +688,26 @@ END;"""
                   status = {MessageStatus.FAILED.value}
                   , done_time = :now
                 WHERE message_id = :message_id
+                  AND status = {MessageStatus.LOCKED.value}
+                  AND claim_id = :claim_id
                 """.strip(),
-                {"now": time_ns(), "message_id": message_id},
+                {
+                    "now": time_seconds(),
+                    "message_id": message_id,
+                    "claim_id": validated_claim_id,
+                },
             )
 
         return cursor.rowcount > 0
 
-    def list_locked(self, threshold_seconds: int) -> Iterator[Message]:
-        """
-        Return all the tasks that have been in the `LOCKED` state for more than
-        `threshold_seconds` seconds.
+    def list_locked(self, threshold_seconds: int | float) -> Iterator[Message]:
+        """Return claims that are older than the specified age.
+
+        This method returns a snapshot. Use `retry_expired()` when a recovery
+        process must retry expired claims atomically.
         """
 
-        threshold_nanoseconds = threshold_seconds * 1e9
+        validated_threshold_seconds = _validate_threshold_seconds(threshold_seconds)
 
         with self._read_connection() as connection:
             rows = connection.execute(
@@ -570,7 +717,7 @@ END;"""
                   status = {MessageStatus.LOCKED.value}
                   AND lock_time < :time_value
                 """.strip(),
-                {"time_value": time_ns() - threshold_nanoseconds},
+                {"time_value": time_seconds() - validated_threshold_seconds},
             ).fetchall()
 
         for result in rows:
@@ -590,25 +737,60 @@ END;"""
         for result in rows:
             yield _message_from_row(result)
 
-    def retry(self, message_id: str) -> bool:
-        """
-        Mark a locked or failed message as ready again.
+    def retry(self, message_id: str, *, claim_id: int) -> bool:
+        """Return a locked or failed message to the ready state.
 
-        Return `True` when the message exists, otherwise `False`.
+        Return `True` when the status and claim ID match. Return `False` for a
+        missing message, stale claim, or invalid state.
         """
+
+        validated_claim_id = _validate_claim_id(claim_id)
 
         with self._write_connection_lock:
             cursor = self.conn.execute(
                 f"""
                 UPDATE {self.table} SET
                   status = {MessageStatus.READY.value}
+                  , lock_time = NULL
                   , done_time = NULL
                 WHERE message_id = :message_id
+                  AND status IN (
+                    {MessageStatus.LOCKED.value},
+                    {MessageStatus.FAILED.value}
+                  )
+                  AND claim_id = :claim_id
                 """.strip(),
-                {"message_id": message_id},
+                {
+                    "message_id": message_id,
+                    "claim_id": validated_claim_id,
+                },
             )
 
         return cursor.rowcount > 0
+
+    def retry_expired(self, threshold_seconds: int | float) -> int:
+        """Return expired claims to ready in one atomic SQL update.
+
+        The threshold must be finite and zero or positive. The return value is
+        the number of claims that changed state.
+        """
+        validated_threshold_seconds = _validate_threshold_seconds(threshold_seconds)
+
+        with self._write_connection_lock:
+            cutoff_time = time_seconds() - validated_threshold_seconds
+            cursor = self.conn.execute(
+                f"""
+                UPDATE {self.table} SET
+                  status = {MessageStatus.READY.value}
+                  , lock_time = NULL
+                  , done_time = NULL
+                WHERE status = {MessageStatus.LOCKED.value}
+                  AND lock_time < :cutoff_time
+                """.strip(),
+                {"cutoff_time": cutoff_time},
+            )
+
+        return cursor.rowcount
 
     def _count_statuses(self, *statuses: MessageStatus) -> int:
         """Return the number of stored messages in the requested states."""
@@ -667,7 +849,8 @@ END;"""
         """
         Delete `DONE` messages.
 
-        If `include_failed` is True, the messages in `FAILED` state will be deleted too.
+        If `include_failed` is True, this method also deletes `FAILED` messages.
+        Deletion releases each message's idempotency key for later reuse.
         """
         with self._write_connection_lock:
             if include_failed:
@@ -689,10 +872,26 @@ END;"""
         with self._write_connection_lock:
             self.conn.execute("VACUUM;")
 
+    @contextmanager
+    def _immediate_transaction_if_needed(self) -> Generator[None]:
+        """Serialize idempotent insertion unless the caller owns a transaction.
+
+        A new immediate transaction makes the key lookup and insert atomic.
+        An explicit caller transaction remains authoritative when one exists.
+        """
+        current_thread = threading.get_ident()
+        current_thread_owns_transaction = self._transaction_owner == current_thread
+        if current_thread_owns_transaction:
+            yield
+            return
+
+        with self.transaction(mode="IMMEDIATE"):
+            yield
+
     # SQLite works better in autocommit mode when using short DML (INSERT /
     # UPDATE / DELETE) statements
     @contextmanager
-    def transaction(self, mode: str = "DEFERRED") -> Iterator[None]:
+    def transaction(self, mode: str = "DEFERRED") -> Generator[None]:
         """Run a transaction while excluding other threads from the connection."""
         if mode not in {"DEFERRED", "IMMEDIATE", "EXCLUSIVE"}:
             raise ValueError(f"Transaction mode '{mode}' is not valid")

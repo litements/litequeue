@@ -5,17 +5,19 @@
 ## Why?
 
 You can use this to implement a persistent queue. It also has extra timing
-metrics for messages and tasks. The API lets you mark a specific `message_id`
+metrics for messages and tasks. The API lets you mark a current message claim
 as **done**.
 
 Since it's all based on SQLite / SQL, it is easily extendable.
 
 Messages are always passed as strings, so you can use json data as messages.
 Messages are interpreted as tasks, so after you `pop` a message, you need to
-mark it as done when you finish processing it. When you run the `.prune()`
-method, it will remove all the finished tasks from the database.
+mark its current claim as done when you finish processing it. When you run the
+`.prune()` method, it removes all finished tasks from the database.
 
-Message IDs follow RFC 9562 UUIDv7.
+Message IDs follow RFC 9562 UUIDv7. Optional idempotency keys make ambiguous
+producer retries safe. Integer claim IDs prevent stale workers from changing
+newer message claims.
 
 ## Installation
 
@@ -34,47 +36,103 @@ from litequeue import LiteQueue
 
 q = LiteQueue(filename="tasks.sqlite3")
 
-q.put("hello")
+q.put("hello", idempotency_key="greeting-1")
 q.put("world")
 
 # Message object used by LiteQueue
-# Message(data='world', message_id=UUID('063e95f1-3d9f-7547-8000-c3eb531fff93'), status=<MessageStatus.READY: 0>, in_time=1676238611851409010, lock_time=None, done_time=None)
+# Message(
+#     data='hello',
+#     message_id='063e95f1-3d9f-7547-8000-c3eb531fff93',
+#     status=<MessageStatus.READY: 0>,
+#     in_time=1676238611.851409,
+#     lock_time=None,
+#     done_time=None,
+#     idempotency_key='greeting-1',
+#     claim_id=0,
+# )
 
 task = q.pop()
+assert task is not None
 
 print(task)
 # Message(
 #     data='hello',
-#     message_id='063e95f1-3d9e-7bbc-8000-a6a18a5f65d1',
-#     status=1,
-#     in_time=1676238611851279408,
-#     lock_time=1676238623180543854,
-#     done_time=None
+#     message_id='063e95f1-3d9f-7547-8000-c3eb531fff93',
+#     status=<MessageStatus.LOCKED: 1>,
+#     in_time=1676238611.851409,
+#     lock_time=1676238623.180544,
+#     done_time=None,
+#     idempotency_key='greeting-1',
+#     claim_id=1,
 # )
 
-updated = q.done(task.message_id)
+updated = q.done(
+    message_id=task.message_id,
+    claim_id=task.claim_id,
+)
 assert updated
 
-# Update methods return False when the message ID does not exist.
-assert not q.done("missing-message")
+# Update methods return False for missing messages and stale claims.
+assert not q.done(
+    message_id="missing-message",
+    claim_id=task.claim_id,
+)
 
 q.get(task.message_id)
 
 # Message(
 #     data='hello',
-#     message_id='063e95f1-3d9e-7bbc-8000-a6a18a5f65d1',
-#     status=2,                <---- status is now 2 (DONE)
-#     in_time=1676238611851279408,
-#     lock_time=1676238623180543854,
-#     done_time=1676238641276753673  <---- done_time contains timestamp now
+#     message_id='063e95f1-3d9f-7547-8000-c3eb531fff93',
+#     status=<MessageStatus.DONE: 2>,
+#     in_time=1676238611.851409,
+#     lock_time=1676238623.180544,
+#     done_time=1676238641.2767537,
+#     idempotency_key='greeting-1',
+#     claim_id=1,
 # )
 
 ```
 
+## Idempotent submission
+
+Pass an idempotency key when a producer must retry an ambiguous `put()`:
+
+```python
+message = q.put(
+    "charge account A-123",
+    idempotency_key="charge-2026-0001",
+)
+```
+
+A replay with the same key and data returns the stored message. A replay with
+different data raises `IdempotencyConflict`.
+
+The key reservation exists until `prune()` deletes the message. See the
+[idempotency guide](docs/idempotency.md) for concurrency, pruning, and
+inbox/outbox examples.
+
+## Message claims
+
+Each `pop()` increments the selected message's integer `claim_id`. Pass that
+claim ID to `done()`, `mark_failed()`, or `retry()`.
+
+Each transition requires its permitted source state and the current claim ID.
+This rule prevents a stale worker from changing a newer delivery.
+
+Use `retry_expired()` for atomic expired-claim recovery:
+
+```python
+retried_count = q.retry_expired(threshold_seconds=30)
+```
+
+See the [message claim guide](docs/message_claim_ids.md) for the state machine,
+race examples, and migration procedure.
+
 ## Differences with a normal Python `queue.Queue`
 
 - Persistence
-- Different API to set tasks as done (you tell it which `message_id` to set as done)
+- Optional idempotent message submission
+- Claim-aware completion, failure, and retry operations
 - Timing metrics. As long as tasks are still in the queue or not pruned, you can see how long they have been there or how long they took to finish.
 - Easy to extend using SQL
 
@@ -164,8 +222,10 @@ Run the consumer in a second terminal:
 uv run examples/consumer.py
 ```
 
-The scripts share `examples/tasks.sqlite3`. The consumer retries failed
-tasks and marks a task as failed after three attempts.
+The scripts share `tasks.sqlite3` in the current working directory. The
+consumer tracks processing attempts separately from message claims. It retries
+failed tasks and marks a task as failed after three attempts. The producer
+supplies a stable idempotency key for each task number.
 
 The `tests/` folder contains more usage scenarios.
 
@@ -223,6 +283,16 @@ distributions, and uploads them with uv.
 
 ## Important changes
 
+- After version 0.13:
+  - `put()` accepts an optional caller-provided `idempotency_key`.
+  - Replays return the stored message, and conflicting data raises `IdempotencyConflict`.
+  - `Message.claim_id` identifies one delivery of a message.
+  - `done()`, `mark_failed()`, and `retry()` require the current claim ID.
+  - `retry_expired()` atomically returns expired claims to `READY`.
+  - Opening an older fixed `Queue` schema adds the new message fields.
+  - Existing locked messages return to `READY` during that schema migration.
+  - Message timestamps and duration comparisons use seconds.
+  - Migration 2 converts old nanosecond timestamps to seconds.
 - After version 0.12:
   - `qsize()` now reports only the ready backlog instead of ready plus locked work.
   - `empty()`, `full()`, and `maxsize` use the same ready-backlog definition.
@@ -235,7 +305,7 @@ distributions, and uploads them with uv.
   - Existing draft-format IDs remain supported without migration.
 - In version 0.6:
   - The database schema has changed and the column `message` is now `data`.
-  - Time is still measured as an integer, but now it's using nanoseconds.
+  - Versions 0.6 through 0.13 stored time as integer nanoseconds.
   - Messages are represented as a frozen dataclass, not as a dictionary.
   - Message IDs are uuidv7 strings.
 - In version 0.4 the database schema has changed and the column `task_id` is now `message_id`.
