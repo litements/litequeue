@@ -238,6 +238,19 @@ def test_checkout_migrates_a_queue_created_by_version_012(tmp_path: Path) -> Non
         _assert_seconds(failed.lock_time, fixture.failed_lock_time_ns)
         _assert_seconds(failed.done_time, fixture.failed_done_time_ns)
 
+        keyed_message = queue.put(
+            "created after migration",
+            idempotency_key="post-migration-message",
+        )
+        keyed_replay = queue.put(
+            "created after migration",
+            idempotency_key="post-migration-message",
+        )
+
+        assert keyed_replay == keyed_message
+        assert keyed_message.idempotency_key == "post-migration-message"
+        assert keyed_message.claim_id == 0
+
         locked_claim = queue.pop()
         assert locked_claim is not None
         assert locked_claim.message_id == recovered_locked.message_id
@@ -264,5 +277,19 @@ def test_checkout_migrates_a_queue_created_by_version_012(tmp_path: Path) -> Non
         assert failed_claim is not None
         assert failed_claim.message_id == failed.message_id
         assert failed_claim.claim_id == 2
+        assert queue.done(
+            message_id=failed_claim.message_id,
+            claim_id=failed_claim.claim_id,
+        )
+
+        keyed_claim = queue.pop()
+        assert keyed_claim is not None
+        assert keyed_claim.message_id == keyed_message.message_id
+        assert keyed_claim.idempotency_key == "post-migration-message"
+        assert keyed_claim.claim_id == 1
+        assert queue.done(
+            message_id=keyed_claim.message_id,
+            claim_id=keyed_claim.claim_id,
+        )
     finally:
         queue.close()
