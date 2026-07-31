@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -188,11 +189,14 @@ def test_checkout_migrates_a_queue_created_by_version_012(tmp_path: Path) -> Non
         str(database_path),
         str(manifest_path),
     ]
+    setup_environment = os.environ.copy()
+    setup_environment.pop("PYTHONPATH", None)
     setup_result = subprocess.run(
         args=command,
         cwd=tmp_path,
         capture_output=True,
         check=False,
+        env=setup_environment,
         text=True,
     )
 
