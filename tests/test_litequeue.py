@@ -22,7 +22,7 @@ def test_message_legacy_constructor_uses_safe_field_defaults() -> None:
         data="work",
         message_id="message-id",
         status=MessageStatus.READY,
-        in_time=1.0,
+        in_time=1,
         lock_time=None,
         done_time=None,
     )
@@ -31,22 +31,22 @@ def test_message_legacy_constructor_uses_safe_field_defaults() -> None:
     assert message.claim_id == 0
 
 
-def test_message_timestamps_use_unix_seconds(
+def test_message_timestamps_use_unix_nanoseconds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Message timestamps and duration calculations use seconds."""
-    current_time = [1_700_000_000.25]
-    monkeypatch.setattr(litequeue, "time_seconds", lambda: current_time[0])
+    """Message timestamps use integer Unix nanoseconds."""
+    current_time_ns = [1_700_000_000_250_000_000]
+    monkeypatch.setattr(litequeue, "time_ns", lambda: current_time_ns[0])
     queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
 
     inserted = queue.put("work")
-    current_time[0] += 1.5
+    current_time_ns[0] += 1_500_000_000
     claimed = queue.pop()
 
     assert claimed is not None
 
-    current_time[0] += 2.25
+    current_time_ns[0] += 2_250_000_000
     assert queue.done(
         message_id=claimed.message_id,
         claim_id=claimed.claim_id,
@@ -55,10 +55,10 @@ def test_message_timestamps_use_unix_seconds(
     completed = queue.get(claimed.message_id)
 
     assert completed is not None
-    assert inserted.in_time == 1_700_000_000.25
+    assert inserted.in_time == 1_700_000_000_250_000_000
     assert completed.in_time == inserted.in_time
-    assert completed.lock_time == inserted.in_time + 1.5
-    assert completed.done_time == inserted.in_time + 3.75
+    assert completed.lock_time == inserted.in_time + 1_500_000_000
+    assert completed.done_time == inserted.in_time + 3_750_000_000
 
 
 def test_uuid7_matches_rfc_9562_test_vector(monkeypatch) -> None:
@@ -465,7 +465,7 @@ def test_queue_creates_fixed_schema(tmp_path: Path) -> None:
     assert trigger is not None
     assert 'CREATE TRIGGER "maxsize_control_Queue"' in trigger[0]
     assert 'ON "Queue"' in trigger[0]
-    assert q.conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert q.conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
     message = q.put("hello")
     assert q.get(message.message_id) is not None
@@ -607,7 +607,8 @@ def test_basic_actions(queue_with_data):
 
     assert done_time >= lock_time >= in_time
     print(
-        f"Task {already_done.message_id} took {done_time - lock_time} seconds to get done and was in the queue for {done_time - in_time} seconds"
+        f"Task {already_done.message_id} took {done_time - lock_time} nanoseconds "
+        f"to get done and was in the queue for {done_time - in_time} nanoseconds"
     )
 
 

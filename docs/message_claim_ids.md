@@ -126,6 +126,9 @@ Use `retry_expired()` to recover claims that are older than a threshold:
 retried_count = queue.retry_expired(threshold_seconds=30)
 ```
 
+Supply the threshold in seconds. LiteQueue converts the threshold to integer
+nanoseconds before it compares `lock_time` values.
+
 The method updates all current expired claims in one SQL statement. It clears
 the obsolete `lock_time` and `done_time` values.
 
@@ -177,8 +180,13 @@ The new schema adds these fields:
 "claim_id" INTEGER NOT NULL DEFAULT 0
 ```
 
-Migration 2 converts `in_time`, `lock_time`, and `done_time` from nanoseconds
-to seconds. New message timestamps use Unix seconds.
+Version 0.13 migration 2 converts `in_time`, `lock_time`, and `done_time` from
+nanoseconds to seconds. Migration 3 converts these values back to integer Unix
+nanoseconds. New message timestamps also use integer Unix nanoseconds.
+
+For a database from version 0.12 or earlier, this round trip can change the
+low-order nanoseconds. Migration 2 stores the timestamps as floating-point
+seconds, which cannot represent every integer nanosecond exactly.
 
 LiteQueue adds the fields when it opens an older fixed `Queue` table. Existing
 messages receive a null key. Most messages receive claim ID `0`.

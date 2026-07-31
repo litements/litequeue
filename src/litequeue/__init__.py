@@ -28,7 +28,7 @@ from litequeue.migrations import MIGRATIONS
 from litequeue.migrations import apply_migrations
 
 # Expose the clock used for persisted message timestamps.
-time_seconds = time.time
+time_ns = time.time_ns
 
 # Copied from CPython's Lib/uuid.py.
 _RFC_4122_VERSION_7_FLAGS = (7 << 76) | (0x8000 << 48)
@@ -65,7 +65,7 @@ def uuid7() -> UUID:
     global _last_timestamp_v7
     global _last_counter_v7
 
-    # UUIDv7 needs millisecond precision. Queue metrics use time_seconds().
+    # UUIDv7 needs millisecond precision. Queue metrics use time_ns().
     nanoseconds = time.time_ns()
     timestamp_ms = nanoseconds // 1_000_000
 
@@ -122,6 +122,7 @@ class IdempotencyConflict(ValueError):
 class Message:
     """A persistent queue message and its current delivery state.
 
+    Non-null timestamp fields contain integer Unix nanoseconds.
     A ready message has claim ID 0 until its first delivery. Each later
     delivery increments the claim ID for that message.
     """
@@ -129,9 +130,9 @@ class Message:
     data: str
     message_id: str  # UUID v7
     status: MessageStatus
-    in_time: float
-    lock_time: float | None
-    done_time: float | None
+    in_time: int
+    lock_time: int | None
+    done_time: int | None
     idempotency_key: str | None = None
     claim_id: int = 0
 
@@ -161,7 +162,9 @@ type PopFunction = Callable[[], Message | None]
 
 _QUEUE_TABLE_NAME = "Queue"
 _READ_CONNECTION_POOL_SIZE = 10
+_NANOSECONDS_PER_SECOND = 1_000_000_000
 _SQLITE_MAX_INTEGER = 2**63 - 1
+_MAX_THRESHOLD_SECONDS = _SQLITE_MAX_INTEGER / _NANOSECONDS_PER_SECOND
 _MANAGED_CONNECTION_OPTIONS = {
     "autocommit",
     "cached_statements",
@@ -222,6 +225,25 @@ def _validate_threshold_seconds(threshold_seconds: int | float) -> float:
         raise ValueError("threshold_seconds must be finite and zero or positive")
 
     return validated_threshold_seconds
+
+
+def _threshold_to_nanoseconds(threshold_seconds: int | float) -> int:
+    """Convert seconds to floored nanoseconds, capped at SQLite's integer limit."""
+    validated_threshold_seconds = _validate_threshold_seconds(threshold_seconds)
+    if validated_threshold_seconds >= _MAX_THRESHOLD_SECONDS:
+        return _SQLITE_MAX_INTEGER
+
+    threshold_nanoseconds = math.floor(
+        validated_threshold_seconds * _NANOSECONDS_PER_SECOND
+    )
+    return threshold_nanoseconds
+
+
+def _claim_cutoff_nanoseconds(threshold_seconds: int | float) -> int:
+    """Return the oldest nonexpired claim timestamp in Unix nanoseconds."""
+    threshold_nanoseconds = _threshold_to_nanoseconds(threshold_seconds)
+    cutoff_nanoseconds = time_ns() - threshold_nanoseconds
+    return cutoff_nanoseconds
 
 
 def validate_maxsize(maxsize: int | None) -> int | None:
@@ -500,7 +522,7 @@ END;"""
     ) -> Message:
         """Insert one message in the active transaction or in autocommit mode."""
         message_id = str(uuid7())
-        now = time_seconds()
+        now = time_ns()
 
         with self._write_connection_lock:
             self.conn.execute(
@@ -545,7 +567,7 @@ END;"""
                                 LIMIT 1)
                  RETURNING *
                  """,
-                {"now": time_seconds()},
+                {"now": time_ns()},
             ).fetchone()
 
             if not message:
@@ -568,7 +590,7 @@ END;"""
             if message is None:
                 return None
 
-            lock_time = time_seconds()
+            lock_time = time_ns()
             self.conn.execute(
                 f"""
                 UPDATE {self.table} SET
@@ -651,7 +673,7 @@ END;"""
         """
 
         validated_claim_id = _validate_claim_id(claim_id)
-        now = time_seconds()
+        now = time_ns()
 
         with self._write_connection_lock:
             cursor = self.conn.execute(
@@ -692,7 +714,7 @@ END;"""
                   AND claim_id = :claim_id
                 """.strip(),
                 {
-                    "now": time_seconds(),
+                    "now": time_ns(),
                     "message_id": message_id,
                     "claim_id": validated_claim_id,
                 },
@@ -703,11 +725,14 @@ END;"""
     def list_locked(self, threshold_seconds: int | float) -> Iterator[Message]:
         """Return claims that are older than the specified age.
 
+        The caller supplies the threshold in seconds. LiteQueue converts it to
+        nanoseconds before it compares stored lock timestamps.
+
         This method returns a snapshot. Use `retry_expired()` when a recovery
         process must retry expired claims atomically.
         """
 
-        validated_threshold_seconds = _validate_threshold_seconds(threshold_seconds)
+        cutoff_nanoseconds = _claim_cutoff_nanoseconds(threshold_seconds)
 
         with self._read_connection() as connection:
             rows = connection.execute(
@@ -715,9 +740,9 @@ END;"""
                 SELECT * FROM {self.table}
                 WHERE
                   status = {MessageStatus.LOCKED.value}
-                  AND lock_time < :time_value
+                  AND lock_time < :cutoff_nanoseconds
                 """.strip(),
-                {"time_value": time_seconds() - validated_threshold_seconds},
+                {"cutoff_nanoseconds": cutoff_nanoseconds},
             ).fetchall()
 
         for result in rows:
@@ -771,13 +796,13 @@ END;"""
     def retry_expired(self, threshold_seconds: int | float) -> int:
         """Return expired claims to ready in one atomic SQL update.
 
-        The threshold must be finite and zero or positive. The return value is
-        the number of claims that changed state.
+        The caller supplies the threshold in seconds. The threshold must be
+        finite and zero or positive. The return value is the number of claims
+        that changed state.
         """
-        validated_threshold_seconds = _validate_threshold_seconds(threshold_seconds)
+        cutoff_nanoseconds = _claim_cutoff_nanoseconds(threshold_seconds)
 
         with self._write_connection_lock:
-            cutoff_time = time_seconds() - validated_threshold_seconds
             cursor = self.conn.execute(
                 f"""
                 UPDATE {self.table} SET
@@ -785,9 +810,9 @@ END;"""
                   , lock_time = NULL
                   , done_time = NULL
                 WHERE status = {MessageStatus.LOCKED.value}
-                  AND lock_time < :cutoff_time
+                  AND lock_time < :cutoff_nanoseconds
                 """.strip(),
-                {"cutoff_time": cutoff_time},
+                {"cutoff_nanoseconds": cutoff_nanoseconds},
             )
 
         return cursor.rowcount

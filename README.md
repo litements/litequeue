@@ -44,7 +44,7 @@ q.put("world")
 #     data='hello',
 #     message_id='063e95f1-3d9f-7547-8000-c3eb531fff93',
 #     status=<MessageStatus.READY: 0>,
-#     in_time=1676238611.851409,
+#     in_time=1676238611851409010,
 #     lock_time=None,
 #     done_time=None,
 #     idempotency_key='greeting-1',
@@ -59,8 +59,8 @@ print(task)
 #     data='hello',
 #     message_id='063e95f1-3d9f-7547-8000-c3eb531fff93',
 #     status=<MessageStatus.LOCKED: 1>,
-#     in_time=1676238611.851409,
-#     lock_time=1676238623.180544,
+#     in_time=1676238611851409010,
+#     lock_time=1676238623180543854,
 #     done_time=None,
 #     idempotency_key='greeting-1',
 #     claim_id=1,
@@ -84,9 +84,9 @@ q.get(task.message_id)
 #     data='hello',
 #     message_id='063e95f1-3d9f-7547-8000-c3eb531fff93',
 #     status=<MessageStatus.DONE: 2>,
-#     in_time=1676238611.851409,
-#     lock_time=1676238623.180544,
-#     done_time=1676238641.2767537,
+#     in_time=1676238611851409010,
+#     lock_time=1676238623180543854,
+#     done_time=1676238641276753673,
 #     idempotency_key='greeting-1',
 #     claim_id=1,
 # )
@@ -118,6 +118,9 @@ claim ID to `done()`, `mark_failed()`, or `retry()`.
 
 Each transition requires its permitted source state and the current claim ID.
 This rule prevents a stale worker from changing a newer delivery.
+
+Message timestamps use integer Unix nanoseconds. Public threshold parameters
+use seconds and include `_seconds` in their names.
 
 Use `retry_expired()` for atomic expired-claim recovery:
 
@@ -283,7 +286,11 @@ distributions, and uploads them with uv.
 
 ## Important changes
 
-- After version 0.13:
+- In version 0.14:
+  - Message timestamps use integer Unix nanoseconds again.
+  - Public `threshold_seconds` values remain in seconds.
+  - Migration 3 converts version 0.13 timestamps from seconds to nanoseconds.
+- In version 0.13:
   - `put()` accepts an optional caller-provided `idempotency_key`.
   - Replays return the stored message, and conflicting data raises `IdempotencyConflict`.
   - `Message.claim_id` identifies one delivery of a message.
@@ -293,7 +300,6 @@ distributions, and uploads them with uv.
   - Existing locked messages return to `READY` during that schema migration.
   - Message timestamps and duration comparisons use seconds.
   - Migration 2 converts old nanosecond timestamps to seconds.
-- After version 0.12:
   - `qsize()` now reports only the ready backlog instead of ready plus locked work.
   - `empty()`, `full()`, and `maxsize` use the same ready-backlog definition.
   - Explicit ready, locked, done, failed, active, and stored count methods are available.
@@ -305,7 +311,7 @@ distributions, and uploads them with uv.
   - Existing draft-format IDs remain supported without migration.
 - In version 0.6:
   - The database schema has changed and the column `message` is now `data`.
-  - Versions 0.6 through 0.13 stored time as integer nanoseconds.
+  - Versions 0.6 through 0.12 stored timestamps as integer Unix nanoseconds.
   - Messages are represented as a frozen dataclass, not as a dictionary.
   - Message IDs are uuidv7 strings.
 - In version 0.4 the database schema has changed and the column `task_id` is now `message_id`.

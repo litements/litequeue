@@ -541,7 +541,7 @@ def test_legacy_schema_migration_adds_safe_message_fields(tmp_path: Path) -> Non
     assert ready is not None
     assert ready.idempotency_key is None
     assert ready.claim_id == 0
-    assert ready.in_time == 1.0
+    assert ready.in_time == 1_000_000_000
     assert recovered is not None
     assert recovered.status is MessageStatus.READY
     assert recovered.lock_time is None
@@ -549,18 +549,18 @@ def test_legacy_schema_migration_adds_safe_message_fields(tmp_path: Path) -> Non
     assert recovered.claim_id == 0
     assert completed is not None
     assert completed.status is MessageStatus.DONE
-    assert completed.in_time == 1.0
-    assert completed.lock_time == 2.0
-    assert completed.done_time == 3.0
+    assert completed.in_time == 1_000_000_000
+    assert completed.lock_time == 2_000_000_000
+    assert completed.done_time == 3_000_000_000
     assert completed.claim_id == 0
     assert failed is not None
     assert failed.status is MessageStatus.FAILED
-    assert failed.in_time == 1.0
-    assert failed.lock_time == 2.0
-    assert failed.done_time == 4.0
+    assert failed.in_time == 1_000_000_000
+    assert failed.lock_time == 2_000_000_000
+    assert failed.done_time == 4_000_000_000
     assert failed.claim_id == 1
     assert {"idempotency_key", "claim_id"} <= column_names
-    assert queue.conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert queue.conn.execute("PRAGMA user_version").fetchone()[0] == 3
     assert queue.qsize() == 2
     assert queue.done_count() == 1
     assert queue.failed_count() == 1

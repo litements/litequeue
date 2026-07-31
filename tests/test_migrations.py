@@ -162,16 +162,17 @@ def test_migration_1_adopts_an_existing_version_012_database(
 
 
 def test_migrations_are_applied_in_version_order(tmp_path: Path) -> None:
-    """A reverse-insertion dictionary still applies migrations 1 and 2."""
+    """A reverse-insertion dictionary still applies every migration."""
     connection = _connect(tmp_path / "queue.sqlite3")
     reverse_order = {
+        3: MIGRATIONS[3],
         2: MIGRATIONS[2],
         1: MIGRATIONS[1],
     }
 
     apply_migrations(connection, reverse_order)
 
-    assert get_user_version(connection) == 2
+    assert get_user_version(connection) == 3
     assert _queue_columns(connection) == [
         "data",
         "message_id",
@@ -185,9 +186,8 @@ def test_migrations_are_applied_in_version_order(tmp_path: Path) -> None:
 
 
 def test_migration_2_upgrades_a_database_at_version_1(tmp_path: Path) -> None:
-    """A database marked as version 1 receives only the feature migration."""
-    database_path = tmp_path / "queue.sqlite3"
-    connection = _connect(database_path)
+    """Published migration 2 converts nanosecond timestamps to seconds."""
+    connection = _connect(tmp_path / "queue.sqlite3")
     _create_version_012_schema(connection)
     connection.execute(
         """
@@ -206,17 +206,75 @@ def test_migration_2_upgrades_a_database_at_version_1(tmp_path: Path) -> None:
         },
     )
     connection.execute("PRAGMA user_version = 1")
+    apply_migrations(
+        connection,
+        {
+            1: MIGRATIONS[1],
+            2: MIGRATIONS[2],
+        },
+    )
+    migrated_message = connection.execute(
+        """
+        SELECT "in_time", "lock_time", "done_time"
+        FROM "Queue"
+        WHERE "message_id" = :message_id
+        """,
+        {"message_id": "message-1"},
+    ).fetchone()
+
+    assert get_user_version(connection) == 2
+    assert _queue_columns(connection)[-2:] == ["idempotency_key", "claim_id"]
+    assert migrated_message is not None
+    assert tuple(migrated_message) == (1.5, 2.0, 3.25)
+
+
+def test_migration_3_upgrades_a_database_at_version_2(tmp_path: Path) -> None:
+    """Migration 3 converts version 0.13 timestamps back to nanoseconds."""
+    database_path = tmp_path / "queue.sqlite3"
+    connection = _connect(database_path)
+    apply_migrations(
+        connection,
+        {
+            1: MIGRATIONS[1],
+            2: MIGRATIONS[2],
+        },
+    )
+    connection.execute(
+        """
+        INSERT INTO "Queue"
+          (
+            "data", "message_id", "idempotency_key", "status",
+            "in_time", "lock_time", "done_time", "claim_id"
+          )
+        VALUES
+          (
+            :data, :message_id, :idempotency_key, :status,
+            :in_time, :lock_time, :done_time, :claim_id
+          )
+        """,
+        {
+            "data": "completed",
+            "message_id": "message-1",
+            "idempotency_key": "request-1",
+            "status": 2,
+            "in_time": 1.5,
+            "lock_time": 2.0,
+            "done_time": 3.25,
+            "claim_id": 1,
+        },
+    )
     connection.close()
 
     queue = LiteQueue(filename=database_path)
     migrated_message = queue.get("message-1")
 
-    assert get_user_version(queue.conn) == 2
-    assert _queue_columns(queue.conn)[-2:] == ["idempotency_key", "claim_id"]
+    assert get_user_version(queue.conn) == 3
     assert migrated_message is not None
-    assert migrated_message.in_time == 1.5
-    assert migrated_message.lock_time == 2.0
-    assert migrated_message.done_time == 3.25
+    assert migrated_message.in_time == 1_500_000_000
+    assert migrated_message.lock_time == 2_000_000_000
+    assert migrated_message.done_time == 3_250_000_000
+    assert migrated_message.idempotency_key == "request-1"
+    assert migrated_message.claim_id == 1
 
 
 def test_existing_version_012_capacity_survives_all_migrations(
@@ -244,7 +302,7 @@ def test_existing_version_012_capacity_survives_all_migrations(
 
     queue = LiteQueue(filename=database_path)
 
-    assert get_user_version(queue.conn) == 2
+    assert get_user_version(queue.conn) == 3
     assert queue.maxsize == 2
     queue.put("first")
     queue.put("second")
@@ -302,7 +360,7 @@ def test_concurrent_migration_runners_apply_each_version_once(
 
     migrated_connection = _connect(database_path)
 
-    assert get_user_version(migrated_connection) == 2
+    assert get_user_version(migrated_connection) == 3
     assert _queue_columns(migrated_connection)[-2:] == [
         "idempotency_key",
         "claim_id",
@@ -314,11 +372,11 @@ def test_newer_database_version_is_rejected_without_schema_changes(
 ) -> None:
     """An older library does not attempt to downgrade a newer database."""
     connection = _connect(tmp_path / "queue.sqlite3")
-    connection.execute("PRAGMA user_version = 3")
+    connection.execute("PRAGMA user_version = 4")
 
     with pytest.raises(
         RuntimeError,
-        match="Database schema version 3 is newer than supported version 2",
+        match="Database schema version 4 is newer than supported version 3",
     ):
         apply_migrations(connection, MIGRATIONS)
 
@@ -331,6 +389,6 @@ def test_newer_database_version_is_rejected_without_schema_changes(
         {"object_type": "table"},
     ).fetchone()
 
-    assert get_user_version(connection) == 3
+    assert get_user_version(connection) == 4
     assert table_count is not None
     assert int(table_count[0]) == 0

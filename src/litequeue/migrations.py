@@ -66,6 +66,16 @@ MIGRATIONS: dict[int, Migration] = {
             "WHERE idempotency_key IS NOT NULL"
         ),
     ),
+    # Restore integer nanosecond timestamps after the seconds storage format.
+    3: (
+        """
+        UPDATE "Queue"
+        SET
+          "in_time" = CAST(ROUND("in_time" * 1000000000.0) AS INTEGER)
+          , "lock_time" = CAST(ROUND("lock_time" * 1000000000.0) AS INTEGER)
+          , "done_time" = CAST(ROUND("done_time" * 1000000000.0) AS INTEGER)
+        """,
+    ),
 }
 
 

@@ -92,14 +92,14 @@ def test_expired_claim_recovery_fences_the_old_worker(
 ) -> None:
     """Expired-claim recovery prevents a late acknowledgement from an old worker."""
     queue = claim_queue
-    current_time = [1.0]
-    monkeypatch.setattr(litequeue, "time_seconds", lambda: current_time[0])
+    current_time_ns = [1_000_000_000]
+    monkeypatch.setattr(litequeue, "time_ns", lambda: current_time_ns[0])
     queue.put("work")
     stale_claim = queue.pop()
 
     assert stale_claim is not None
 
-    current_time[0] += 31
+    current_time_ns[0] += 31_000_000_000
 
     assert queue.retry_expired(threshold_seconds=30) == 1
 
@@ -231,13 +231,13 @@ def test_retry_expired_changes_only_old_locked_messages(
 ) -> None:
     """Expired-claim recovery leaves fresh claims and other states unchanged."""
     queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
-    current_time = [1.0]
-    monkeypatch.setattr(litequeue, "time_seconds", lambda: current_time[0])
+    current_time_ns = [1_000_000_000]
+    monkeypatch.setattr(litequeue, "time_ns", lambda: current_time_ns[0])
 
     queue.put("old claim")
     old_claim = queue.pop()
 
-    current_time[0] += 5
+    current_time_ns[0] += 5_000_000_000
     queue.put("completed")
     completed_claim = queue.pop()
     queue.put("failed")
@@ -257,12 +257,12 @@ def test_retry_expired_changes_only_old_locked_messages(
     completed_before = queue.get(completed_claim.message_id)
     failed_before = queue.get(failed_claim.message_id)
 
-    current_time[0] += 15
+    current_time_ns[0] += 15_000_000_000
     queue.put("fresh claim")
     fresh_claim = queue.pop()
     queue.put("ready")
 
-    current_time[0] += 15
+    current_time_ns[0] += 15_000_000_000
 
     assert old_claim is not None
     assert fresh_claim is not None
@@ -322,11 +322,11 @@ def test_concurrent_expired_recovery_retries_each_claim_once(
     database_path = tmp_path / "queue.sqlite3"
     first_queue = LiteQueue(filename=database_path)
     second_queue = LiteQueue(filename=database_path)
-    current_time = [1.0]
-    monkeypatch.setattr(litequeue, "time_seconds", lambda: current_time[0])
+    current_time_ns = [1_000_000_000]
+    monkeypatch.setattr(litequeue, "time_ns", lambda: current_time_ns[0])
     first_queue.put("work")
     claim = first_queue.pop()
-    current_time[0] += 2
+    current_time_ns[0] += 2_000_000_000
     barrier = threading.Barrier(2)
 
     def recover(queue: LiteQueue) -> int:
@@ -359,11 +359,11 @@ def test_completion_and_expired_recovery_have_one_winner(
     database_path = tmp_path / "queue.sqlite3"
     worker_queue = LiteQueue(filename=database_path)
     recovery_queue = LiteQueue(filename=database_path)
-    current_time = [1.0]
-    monkeypatch.setattr(litequeue, "time_seconds", lambda: current_time[0])
+    current_time_ns = [1_000_000_000]
+    monkeypatch.setattr(litequeue, "time_ns", lambda: current_time_ns[0])
     worker_queue.put("work")
     claim = worker_queue.pop()
-    current_time[0] += 2
+    current_time_ns[0] += 2_000_000_000
     barrier = threading.Barrier(2)
 
     assert claim is not None
@@ -408,18 +408,38 @@ def test_retry_expired_uses_a_strict_age_boundary(
 ) -> None:
     """A claim expires only after its age is greater than the threshold."""
     queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
-    current_time = [1.0]
-    monkeypatch.setattr(litequeue, "time_seconds", lambda: current_time[0])
+    current_time_ns = [1_000_000_000]
+    monkeypatch.setattr(litequeue, "time_ns", lambda: current_time_ns[0])
     queue.put("work")
     claim = queue.pop()
-    current_time[0] += 30
+    current_time_ns[0] += 100_000_000
 
     assert claim is not None
-    assert queue.retry_expired(threshold_seconds=30) == 0
+    assert queue.retry_expired(threshold_seconds=0.1) == 0
 
-    current_time[0] += 0.001
+    current_time_ns[0] += 1
 
-    assert queue.retry_expired(threshold_seconds=30) == 1
+    assert queue.retry_expired(threshold_seconds=0.1) == 1
+
+
+def test_retry_expired_uses_a_fractional_nanosecond_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fractional-nanosecond threshold follows the strict age contract."""
+    queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
+    current_time_ns = [1_000_000_000]
+    monkeypatch.setattr(litequeue, "time_ns", lambda: current_time_ns[0])
+    queue.put("work")
+    claim = queue.pop()
+    current_time_ns[0] += 1
+
+    assert claim is not None
+    assert queue.retry_expired(threshold_seconds=1.1e-9) == 0
+
+    current_time_ns[0] += 1
+
+    assert queue.retry_expired(threshold_seconds=1.1e-9) == 1
 
 
 def test_retry_expired_rejects_a_seconds_threshold_too_large_for_float(
@@ -434,11 +454,24 @@ def test_retry_expired_rejects_a_seconds_threshold_too_large_for_float(
 
 def test_retry_expired_accepts_a_large_finite_seconds_threshold(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A large finite seconds value remains valid."""
+    """A large finite threshold does not expire a live claim."""
     queue = LiteQueue(filename=tmp_path / "queue.sqlite3")
+    current_time_ns = [1_000_000_000]
+    monkeypatch.setattr(litequeue, "time_ns", lambda: current_time_ns[0])
+    queue.put("work")
+    claim = queue.pop()
+    current_time_ns[0] += 10_000_000_000
 
+    assert claim is not None
     assert queue.retry_expired(threshold_seconds=sys.float_info.max) == 0
+
+    stored_message = queue.get(claim.message_id)
+
+    assert stored_message is not None
+    assert stored_message.status is MessageStatus.LOCKED
+    assert stored_message.claim_id == claim.claim_id
 
 
 def test_claim_id_sequence_survives_close_and_reopen(tmp_path: Path) -> None:
