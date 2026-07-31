@@ -47,9 +47,12 @@ lint: ## Run lint checks
 benchmark: ## Run benchmarks
 	uv run benchmark.py
 
+.PHONY: bump
+bump: ## Bump the version number
+	uv version --bump minor
 
 .PHONY: publish
-publish: ## Test, bump the minor version, build, and publish to PyPI
+publish: ## Test, build, and publish to PyPI
 	@: "$${UV_PUBLISH_TOKEN:?Set UV_PUBLISH_TOKEN before publishing}"
 	$(MAKE) test
 	@rm -rf dist/
